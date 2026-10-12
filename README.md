@@ -2,6 +2,8 @@
 
 > Team Repository of the contest “Digital Mine on OpenEgiz”. **Replace the contents of this file with the instructions for your Submission.** The AI Jury runs the Submission strictly by these instructions, from scratch, in the Judge Environment. Accepted languages: English, Kazakh, Russian.
 
+> **Start with the Concept**, the first section of [SUBMISSION.md](SUBMISSION.md): the Team writes it before any code. What AI agents build from this Template without a Concept is the Default Solution, published on the [contest site](https://openegiz-contest.github.io/) as the low bar: a Submission that does not go beyond it gets low levels in the Rubric. AI agents read [AGENTS.md](AGENTS.md).
+
 ## Running
 
 Requirements (Docker, `make`, Windows/WSL2 setup) are in [OPENEGIZ.md](OPENEGIZ.md) / [OPENEGIZ.ru.md](OPENEGIZ.ru.md).
@@ -26,6 +28,7 @@ Replace these commands with the commands of your Submission. The Submission must
 | `team/` | Directory for the Team's code. Using it is optional: any part may be changed, including the platform core |
 | `SUBMISSION.md` | Description of the Submission: **required** |
 | `presentation.pdf` | Presentation: **required**, in the repository root |
+| `AGENTS.md`, `CLAUDE.md` | Instructions for your AI agents (Codex, Claude Code and others read them automatically) |
 | `examples/mine/` | The Example Mine: shows how a digital mine is built on OpenEgiz. It is not a basis for the Submission |
 | `OPENEGIZ.md`, `OPENEGIZ.ru.md` | Documentation of the OpenEgiz platform v1.0.4 |
 

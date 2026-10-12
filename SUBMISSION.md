@@ -2,11 +2,27 @@
 
 <!-- Fill in every section. The AI Jury studies this file together with the code, the Build Report, the presentation and the Stand's interface. Accepted languages: English, Kazakh, Russian. These hint comments may be deleted. -->
 
+## Concept
+
+<!-- Written by the Team before the code: your own choice, a few sentences per answer. Everything else in the Submission follows from it. -->
+
+**Enterprise:** <!-- Which mining enterprise, or which part of it, the twin represents. -->
+
+**Users:** <!-- Who uses the twin. -->
+
+**Decision:** <!-- Which decision the twin helps them make. -->
+
+**Why this choice:** <!-- Why this enterprise, these users and this decision. -->
+
+**Real or fictional:** <!-- A real object: name it and give the sources of its numbers. A fictional one: which real objects it resembles and where its numbers come from. A real object with sourced numbers scores higher. -->
+
 ## Team
 
-| Participant | GitHub |
-|---|---|
-|  |  |
+<!-- GitHub usernames of the Participants. Other personal data are not required: the repository becomes public after the Freeze (Rules, section 15). -->
+
+| GitHub |
+|---|
+|  |
 
 ## Mine
 
