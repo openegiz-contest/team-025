@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Участок карьера — org.openegiz.pit</title>
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b22; --panel-border: #2a3139; --text: #d8dee6; --dim: #8b96a3;
+    --ok: #3fb950; --warn: #d29922; --bad: #e5534b; --accent: #58a6ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 13px/1.4 -apple-system, "Segoe UI", sans-serif; }
+  #scene { position: fixed; inset: 0; }
+  .panel {
+    position: fixed; background: rgba(22,27,34,0.92); border: 1px solid var(--panel-border);
+    border-radius: 8px; padding: 10px 12px; backdrop-filter: blur(4px); max-height: calc(100vh - 20px); overflow: auto;
+  }
+  .panel h2 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--dim); font-weight: 600; }
+  #kpi { top: 10px; left: 10px; right: 10px; display: flex; gap: 18px; flex-wrap: wrap; align-items: baseline; padding: 8px 14px; }
+  #kpi .stat { display: flex; flex-direction: column; min-width: 90px; }
+  #kpi .stat .v { font-size: 18px; font-weight: 700; }
+  #kpi .stat .l { color: var(--dim); font-size: 11px; }
+  #inspect { top: 60px; right: 10px; width: 260px; }
+  #inspect table { border-collapse: collapse; width: 100%; }
+  #inspect td { padding: 2px 4px; vertical-align: top; }
+  #inspect td:first-child { color: var(--dim); white-space: nowrap; }
+  #scenarios { bottom: 10px; left: 10px; width: 300px; }
+  #scenarios button { display: block; width: 100%; margin: 3px 0; padding: 6px 8px; border-radius: 5px; border: 1px solid var(--panel-border);
+    background: #1c2330; color: var(--text); cursor: pointer; font-size: 12px; text-align: left; }
+  #scenarios button:hover { border-color: var(--accent); }
+  #scenarios button.undo { color: var(--dim); }
+  #scenarios .row { display: flex; gap: 6px; margin: 3px 0; }
+  #scenarios .row button { margin: 0; flex: 1; }
+  #dispatch { bottom: 10px; left: 320px; width: 230px; }
+  #dispatch .truck-row { display: flex; justify-content: space-between; align-items: center; margin: 3px 0; gap: 6px; }
+  #dispatch select { background: #1c2330; color: var(--text); border: 1px solid var(--panel-border); border-radius: 4px; font-size: 11px; }
+  #recommend { bottom: 10px; right: 10px; width: 280px; }
+  #recommend .msg { padding: 6px 0; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; }
+  .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--bad); }
+  #legend { top: 60px; left: 10px; width: 170px; font-size: 11px; }
+  #legend div { margin: 2px 0; }
+  #hint { position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%); color: var(--dim); font-size: 11px; }
+</style>
+</head>
+<body>
+<div id="scene"></div>
+
+<div id="kpi" class="panel"></div>
+<div id="legend" class="panel"></div>
+<div id="inspect" class="panel"><h2>Двойник</h2><div id="inspect-body">Кликните по объекту на сцене.</div></div>
+<div id="scenarios" class="panel"><h2>Сценарии «что если»</h2><div id="scenarios-body"></div></div>
+<div id="dispatch" class="panel"><h2>Диспетчеризация: самосвал → экскаватор</h2><div id="dispatch-body"></div></div>
+<div id="recommend" class="panel"><h2>Контроль качества руды</h2><div id="recommend-body"></div></div>
+
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.js" } }
+</script>
+<script type="module" src="app.js"></script>
+</body>
+</html>

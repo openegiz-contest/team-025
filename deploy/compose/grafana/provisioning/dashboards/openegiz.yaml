@@ -14,3 +14,12 @@ providers:
     allowUiUpdates: true
     options:
       path: /var/lib/grafana/example-dashboards
+  # Filled by team/mine/compose.yml; empty otherwise. Separate from the two
+  # providers above: our dashboard is neither a platform default nor an
+  # Example, and shouldn't be filed under either folder.
+  - name: team
+    folder: Участок карьера
+    type: file
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/team-dashboards

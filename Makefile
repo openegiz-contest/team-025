@@ -1,15 +1,17 @@
-.PHONY: up down ps logs smoke clean example-mine example-mine-stop install uninstall status endpoints upgrade upload-build generate-data copy-build unity-demo check-secrets check-public-host
+.PHONY: up down ps logs smoke clean example-mine example-mine-stop team-mine team-mine-stop install uninstall status endpoints upgrade upload-build generate-data copy-build unity-demo check-secrets check-public-host
 
 # ---------------------------------------------------------------------------
 # Docker Compose deployment (laptops, CI, contest judges): deploy/compose/
 # ---------------------------------------------------------------------------
 COMPOSE_BASE := docker compose -f deploy/compose/docker-compose.yml
-# Once `make example-mine` has run, every compose command also loads the mine
-# overlay, so `down` stops its simulator and `up` keeps its Grafana dashboard.
-# `make clean` forgets it.
+# Once `make example-mine` / `make team-mine` has run, every compose command
+# also loads that overlay, so `down` stops its simulator and `up` keeps its
+# Grafana dashboard. `make clean` forgets both.
 MINE_MARKER  := deploy/compose/.example-mine
 MINE_COMPOSE := examples/mine/compose.yml
-COMPOSE := $(COMPOSE_BASE)$(if $(wildcard $(MINE_MARKER)), -f $(MINE_COMPOSE))
+TEAM_MINE_MARKER  := deploy/compose/.team-mine
+TEAM_MINE_COMPOSE := team/mine/compose.yml
+COMPOSE := $(COMPOSE_BASE)$(if $(wildcard $(MINE_MARKER)), -f $(MINE_COMPOSE))$(if $(wildcard $(TEAM_MINE_MARKER)), -f $(TEAM_MINE_COMPOSE))
 
 ## Start the whole platform with Docker Compose (first run: generates credentials)
 up:
@@ -49,10 +51,20 @@ example-mine: up
 example-mine-stop:
 	$(COMPOSE_BASE) -f $(MINE_COMPOSE) stop mine-simulator
 
+## Run the team's own open-pit section (twins + SimPy simulator) on the compose stack
+team-mine: up
+	$(COMPOSE_BASE) -f $(TEAM_MINE_COMPOSE) up -d --build --wait --wait-timeout 300
+	@touch $(TEAM_MINE_MARKER)
+	@echo "Team mine running: 3D viewer -> http://localhost:$${TEAM_MINE_VIEWER_PORT:-8091}; twins under org.openegiz.pit also visible in the OpenEgiz Twins app; see team/mine/README.md to verify."
+
+## Stop the team's simulator (twins and data stay)
+team-mine-stop:
+	$(COMPOSE_BASE) -f $(TEAM_MINE_COMPOSE) stop team-mine-simulator
+
 ## Stop the platform and DELETE all its data and credentials
 clean:
 	$(COMPOSE) down -v --remove-orphans
-	rm -f deploy/compose/.env $(MINE_MARKER)
+	rm -f deploy/compose/.env $(MINE_MARKER) $(TEAM_MINE_MARKER)
 
 # ---------------------------------------------------------------------------
 # Helm deployment (servers): the chart at the repository root

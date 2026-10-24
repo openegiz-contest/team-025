@@ -1,0 +1,62 @@
+# Team's open-pit section: an overlay on deploy/compose/docker-compose.yml.
+# Dev/test overlay for twins + simulator + MQTT -> Ditto (stage 15-18.10) and
+# the 3D viewer + what-if scenario panel (stage 18-22.10).
+# Not yet wired as the Submission's single entrypoint -- see team/mine/README.md.
+#
+# Bring up: make team-mine (from the repo root), or directly:
+# docker compose -f ../../deploy/compose/docker-compose.yml -f compose.yml up -d --build --wait
+
+services:
+  team-mine-setup:
+    # Relative to the BASE compose file's directory (deploy/compose/), not
+    # this file's -- Compose resolves `-f` overlay paths that way. Same
+    # idiom as examples/mine/compose.yml's `build: ../../examples/mine`.
+    build: ../../team/mine
+    image: openegiz/team-mine:local
+    restart: "no"
+    command: ["python", "setup_twins.py"]
+    environment:
+      DITTO_URL: http://ditto-nginx:80
+      DITTO_PASSWORD: ${DITTO_PASSWORD}
+    depends_on:
+      init:
+        condition: service_completed_successfully
+
+  # Same image as team-mine-setup, which builds it -- see examples/mine/compose.yml
+  # for why only one service may carry `build:`.
+  team-mine-simulator:
+    image: openegiz/team-mine:local
+    pull_policy: never
+    restart: unless-stopped
+    mem_limit: 128m
+    environment:
+      MQTT_HOST: mosquitto
+      MQTT_PORT: "1883"
+      DITTO_URL: http://ditto-nginx:80
+      DITTO_PASSWORD: ${DITTO_PASSWORD}
+      SIM_SPEEDUP: ${SIM_SPEEDUP:-10}
+    depends_on:
+      team-mine-setup:
+        condition: service_completed_successfully
+
+  # Grafana is defined in the base compose file; this only adds a volume so
+  # our dashboard lands in its own "Участок карьера" folder (provisioning
+  # provider "team" in deploy/compose/grafana/provisioning/dashboards/) --
+  # not mixed into the platform's own folder or the Examples one. Same idiom
+  # as examples/mine/compose.yml's dashboard mount.
+  grafana:
+    volumes:
+      - ../../team/mine/dashboard.json:/var/lib/grafana/team-dashboards/team-mine.json:ro
+
+  team-mine-viewer:
+    build: ../../team/mine/viewer
+    image: openegiz/team-mine-viewer:local
+    restart: unless-stopped
+    mem_limit: 64m
+    environment:
+      DITTO_PASSWORD: ${DITTO_PASSWORD}
+    ports:
+      - "${OPENEGIZ_BIND:-127.0.0.1}:${TEAM_MINE_VIEWER_PORT:-8091}:80"
+    depends_on:
+      team-mine-setup:
+        condition: service_completed_successfully
