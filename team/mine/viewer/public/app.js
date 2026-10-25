@@ -255,7 +255,11 @@ scene.add(sun.target);
 // above already carries most of the ambient color now, this just softens it.
 // Ground term is a warm sand bounce, not near-black, or everything facing
 // away from the sun turns into a silhouette.
-scene.add(new THREE.HemisphereLight(0xa9c4dd, 0x5a4a35, 0.5));
+// A 7.5-unit wall at a 19deg sun throws a 22-unit shadow across a 12-unit
+// bench, so every bench below the rim is fully shaded -- which is true of a
+// real pit and makes for good photographs, but it buried the haul roads.
+// The fill is what lifts shaded rock without flattening the sunlit steppe.
+scene.add(new THREE.HemisphereLight(0xa9c4dd, 0x6b5942, 0.78));
 
 // ---------------------------------------------------------------------------
 // Terrain: textured steppe floor with a real hole cut where the pit is, a
@@ -363,8 +367,13 @@ const PIT_BENCH_W = 12;          // width of the flat bench between two walls
 const NODE_ELEV_M = {
   "crusher-01": 0, "stockpile-01": 0, "conveyor-01": 0, "fuel-01": 0, "repair-01": 0,
   "junction-01": -15, "face-ore-01": -45, "face-ore-02": -60,
-  "face-waste-01": 10, "dump-01": 35,
+  "face-waste-01": 10, "dump-01": 20,
 };
+// The waste dump is not a pad at an elevation -- it IS the elevation: a mound
+// built up from grade whose crest is the dump's registered level. So its mesh
+// stands on the ground and its own height carries the number, unlike every
+// other node, which is placed at its elevation.
+const NODE_MESH_AT_GRADE = new Set(["dump-01"]);
 const elevY = (id) => (NODE_ELEV_M[id] ?? 0) * VSCALE;
 
 // Radius of the pit wall at a given depth below the rim, following the same
@@ -408,6 +417,11 @@ function pitNodePosition(id) {
   return pitPolar(rampAngleAt(depth) + place.aroundRamp,
                   pitWallRadiusAt(depth) - place.inset, -depth);
 }
+
+// The stripping bench is a built-up pad: its top carries face-waste-01 and
+// its flank is the ramp down to grade. Shared with the pad geometry below so
+// the road lands on the slope rather than through it.
+const WASTE_PAD = { rTop: 30, rBase: 44 };
 
 for (const id of Object.keys(PIT_NODE_PLACEMENT)) NODE_POSITIONS[id] = pitNodePosition(id);
 for (const [id, p] of Object.entries(NODE_POSITIONS)) p[1] = p[1] || elevY(id);
@@ -546,17 +560,29 @@ function buildPit() {
   let r = PIT_RIM_R, y = 0;
   for (let i = 0; i < LEVELS; i++) {
     const rBottom = r - WALL_IN;
-    const geo = new THREE.CylinderGeometry(r, rBottom, DROP, 72, 3, true);
+    const geo = new THREE.CylinderGeometry(r, rBottom, DROP, 108, 6, true);
     // Rugged face: only interior rows move, so the top/bottom rings still
     // meet the benches exactly. Angle-based offsets keep the seam closed.
+    //
+    // The displacement is deliberately noisy in BOTH axes. With a smooth
+    // radial-only wobble on a regular grid, flat shading turned every quad
+    // into a flat rectangle of its own shade and the wall read as tiling --
+    // which got much more obvious once the pit grew to four benches. Pushing
+    // the rows up and down as well breaks the quads out of their rows, so
+    // the facets look like broken rock instead of masonry.
     const pos = geo.attributes.position;
     const v = new THREE.Vector3();
     for (let k = 0; k < pos.count; k++) {
       v.fromBufferAttribute(pos, k);
       if (Math.abs(Math.abs(v.y) - DROP / 2) < 1e-3) continue;
       const a = Math.atan2(v.z, v.x);
-      const n = 1 + 0.035 * Math.sin(a * 13 + v.y * 1.7 + i) + 0.025 * Math.sin(a * 29 - v.y + i * 3);
-      pos.setXYZ(k, v.x * n, v.y, v.z * n);
+      const n = 1
+        + 0.030 * Math.sin(a * 13 + v.y * 1.7 + i)
+        + 0.022 * Math.sin(a * 29 - v.y * 2.3 + i * 3)
+        + 0.015 * Math.sin(a * 61 + v.y * 5.1 + i * 7)
+        + 0.010 * Math.sin(a * 97 - v.y * 9.3);
+      const dy = DROP * (0.055 * Math.sin(a * 23 + i * 2) + 0.035 * Math.sin(a * 53 - v.y * 3.7));
+      pos.setXYZ(k, v.x * n, v.y + dy, v.z * n);
     }
     geo.computeVertexNormals();
     const wall = new THREE.Mesh(geo, wallMats[i % 2]);
@@ -658,7 +684,7 @@ function buildPit() {
   // Copper pits collect blue-green water at the bottom.
   const lake = new THREE.Mesh(
     new THREE.CircleGeometry(r * 0.6, 48),
-    new THREE.MeshPhysicalMaterial({ color: 0x2f7377, roughness: 0.06, metalness: 0, clearcoat: 1, clearcoatRoughness: 0.05 }),
+    new THREE.MeshPhysicalMaterial({ color: 0x2f7377, roughness: 0.22, metalness: 0, clearcoat: 0.35, clearcoatRoughness: 0.3 }),
   );
   lake.rotation.x = -Math.PI / 2;
   lake.position.set(cx + 3, y + 0.06, cz + 2);
@@ -1267,7 +1293,8 @@ const pickables = []; // { mesh, id } -- mesh is a Group; raycast is recursive, 
 const nodeMeshes = {}; // id -> Group
 
 function addNode(id, label, group, labelY) {
-  const [x, y, z] = NODE_POSITIONS[id];
+  const [x, ey, z] = NODE_POSITIONS[id];
+  const y = NODE_MESH_AT_GRADE.has(id) ? 0 : ey;
   group.position.set(x, y, z);
   group.userData.id = id;
   scene.add(group);
@@ -1364,7 +1391,13 @@ addNode("face-waste-01", "Уступ вскрыши", buildFaceMesh("excavator-0
 // exist in Ditto but there is nothing on the Stand to click, and a twin you
 // cannot see is a twin you cannot verify.
 const benchGroups = {};
+// Where the highlight ring goes for a bench: concentric with the pit at the
+// bench's own radius, because the "object" is an annulus of rock, not a
+// compact machine. Without this the generic path rings the group's origin --
+// world zero -- at the radius of the whole pit.
+const BENCH_RING = {};
 function addBenchTwin(id, mesh, labelAngle, labelRadius) {
+  BENCH_RING[id] = { x: PIT_CENTER.x, z: PIT_CENTER.z, y: benchTwinY(id), r: labelRadius };
   const group = new THREE.Group();
   group.add(mesh);
   group.userData.id = id;
@@ -1386,8 +1419,11 @@ for (const id of ["bench-n45", "bench-n60"]) {
   // The stripping bench is a graded pad above grade, not a cut into the pit:
   // it is the ground face-waste-01 and excavator-03 actually stand on.
   const W = NODE_POSITIONS["face-waste-01"];
+  // A cut-and-fill bench, so its flank is a slope the haul road climbs, not a
+  // cliff the road would cut through. WASTE_PAD is shared with roadWaypoints.
   const pad = new THREE.Mesh(
-    new THREE.CylinderGeometry(30, 34, Math.max(0.6, W[1]), 7),
+    roughen(new THREE.CylinderGeometry(WASTE_PAD.rTop, WASTE_PAD.rBase, Math.max(0.6, W[1]), 56, 2), 0.04,
+            { keepBelowY: -Math.max(0.6, W[1]) / 2 + 0.01 }),
     new THREE.MeshStandardMaterial({ color: 0x6a5c48, roughness: 1, flatShading: true }),
   );
   pad.position.set(W[0], W[1] / 2, W[2]);
@@ -1399,6 +1435,7 @@ for (const id of ["bench-n45", "bench-n60"]) {
   benchGroups["bench-p10"] = group;
   pickables.push({ mesh: group, id: "bench-p10" });
   nodeMeshes["bench-p10"] = group;
+  BENCH_RING["bench-p10"] = { x: W[0], z: W[2], y: W[1], r: 31 };
   const sprite = makeLabel(BENCH_TWINS["bench-p10"].label, 0.82);
   sprite.position.set(W[0] - 22, W[1] + 7.5, W[2] + 16);
   scene.add(sprite);
@@ -1750,7 +1787,7 @@ const _qPitch = new THREE.Quaternion();
 // dump's toe, not in the middle of the building/mound.
 const ROAD_NODE_OVERRIDE = {
   "crusher-01": [0, 0, 19],
-  "dump-01": [-102, elevY("dump-01") * 0.42, 46],  // the toe, part-way up the mound
+  "dump-01": [-102.3, 3.4, 50.6],  // on the dump's second lift, where trucks tip
 };
 const roadNode = (id) => ROAD_NODE_OVERRIDE[id] || NODE_POSITIONS[id];
 
@@ -1788,6 +1825,19 @@ function roadWaypoints(id) {
   const a = roadNode(from), b = roadNode(to);
   if (!a || !b) return null;
   if (PIT_NODE_PLACEMENT[from] && to === "junction-01") return pitExitWaypoints(from);
+  if (from === "face-waste-01") {
+    // Off the top of the stripping bench, down its flank, then across to the
+    // dump. Without the two edge points the road spanned the drop in one
+    // straight segment and sank into the pad.
+    const W = NODE_POSITIONS["face-waste-01"];
+    const [ux, uz] = dirXZ(W, b);
+    return [
+      a,
+      [W[0] + ux * WASTE_PAD.rTop, W[1], W[2] + uz * WASTE_PAD.rTop],
+      [W[0] + ux * WASTE_PAD.rBase, 0, W[2] + uz * WASTE_PAD.rBase],
+      b,
+    ];
+  }
   const bend = ROAD_BEND[id];
   if (!bend) return [a, b];
   // The bend sits at the height the straight line would have had there, so a
@@ -1889,7 +1939,11 @@ function buildRoads() {
       const surfaceTex = roadTexBase.clone();
       surfaceTex.needsUpdate = true;
       surfaceTex.repeat.set((len + ROAD_W * 0.5) / 11, 1);
-      part(boxG(len + ROAD_W * 0.5, 0.3, ROAD_W), new THREE.MeshStandardMaterial({ map: surfaceTex, roughness: 1 }), 0, 0.15, 0, seg, false);
+      const surfaceMat = new THREE.MeshStandardMaterial({
+        map: surfaceTex, roughness: 1,
+        color: wp.pavedUntil ? 0xc9bda6 : 0xffffff,
+      });
+      part(boxG(len + ROAD_W * 0.5, 0.3, ROAD_W), surfaceMat, 0, 0.15, 0, seg, false);
       // Each road's stripe at its own height: where two roads overlap (junction,
       // crusher end) their stripes would otherwise share a plane and z-fight.
       part(boxG(len, 0.04, 0.95), stripeMat, 0, 0.33 + roadIndex * 0.015, 0, seg, false);
@@ -2235,7 +2289,11 @@ function updateSelection(nowMs) {
   if (!mesh) { selectionRing.visible = false; return; }
   selectionRing.visible = true;
   let radius;
-  if (roadMeshes[selectedId]) {
+  const bench = BENCH_RING[selectedId];
+  if (bench) {
+    selectionRing.position.set(bench.x, bench.y + 0.3, bench.z);
+    radius = bench.r;
+  } else if (roadMeshes[selectedId]) {
     // A road's bounding box is the whole road; ring it at its midpoint instead.
     const p = roadPose(selectedId, 0.5).pos;
     selectionRing.position.set(p[0], p[1] + 0.12, p[2]);

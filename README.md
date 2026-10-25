@@ -11,7 +11,7 @@ sudo apt install -y make   # если make нет (чистый Ubuntu)
 make team-mine              # платформа OpenEgiz + наш участок карьера: двойники, симулятор, 3D-сцена
 ```
 
-Одна команда поднимает всё: платформу (Ditto, MQTT, InfluxDB, Grafana), создаёт 26 двойников нашего участка, запускает симулятор и 3D-вьюер. Первый запуск скачивает образы и собирает наши — несколько минут; дальше — быстрее.
+Одна команда поднимает всё: платформу (Ditto, MQTT, InfluxDB, Grafana), создаёт 29 двойников нашего участка, запускает симулятор и 3D-вьюер. Первый запуск скачивает образы и собирает наши — несколько минут; дальше — быстрее.
 
 ## Что открыть
 
@@ -23,7 +23,7 @@ make team-mine              # платформа OpenEgiz + наш участо�
 
 ```bash
 make ps                           # все сервисы, включая team-mine-setup/-simulator/-viewer, должны быть Up/Exited(0)
-make tail S=team-mine-setup       # должно быть "26 twins ready"
+make tail S=team-mine-setup       # должно быть "29 twins ready"
 make tail S=team-mine-simulator   # раз в ~30с строка "sim NNN min | crusher ..."
 ```
 

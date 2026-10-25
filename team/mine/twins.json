@@ -924,9 +924,9 @@
       "priority": "primary",
       "length_km": 2.6,
       "elev_from_m": 10.0,
-      "elev_to_m": 35.0,
-      "avg_grade_pct": 0.96,
-      "ruling_grade_pct": 2.4,
+      "elev_to_m": 20.0,
+      "avg_grade_pct": 0.38,
+      "ruling_grade_pct": 1.0,
       "width_m": 32.0,
       "closed": false
     },

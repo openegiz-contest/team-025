@@ -15,7 +15,7 @@
 Вскрышной уступ ──[Экскаватор-03]──road-waste──▶ Отвал вскрыши
 ```
 
-Namespace Ditto: `org.openegiz.pit`. 26 двойников, самосвалы — общий парк, диспетчер переназначает их между тремя экскаваторами через признак `assigned_excavator`.
+Namespace Ditto: `org.openegiz.pit`. 29 двойников (14 типов), самосвалы — общий парк, диспетчер переназначает их между тремя экскаваторами через признак `assigned_excavator`.
 
 ## Запуск (dev-оверлей этого этапа)
 
@@ -74,7 +74,7 @@ simulator.py (SimPy) ──MQTT telemetry/<twin>──▶ Ditto ──MQTT opent
 ## Проверка
 
 1. `make team-mine`, подождать, пока три сервиса (`team-mine-setup`, `team-mine-simulator`, `team-mine-viewer`) поднимутся: `make ps`.
-2. Twins created: `make tail S=team-mine-setup` — должно быть `26 twins ready`.
+2. Twins created: `make tail S=team-mine-setup` — должно быть `29 twins ready`.
 3. Телеметрия идёт: `make tail S=team-mine-simulator` — раз в ~15 публикаций строка `sim NNN min | crusher ...`.
 4. В Ditto: `curl -u ditto:$DITTO_PASSWORD http://localhost:8080/api/2/things/org.openegiz.pit:crusher-01` — `throughput_tph` должен расти от 0 и выйти на ~2850 т/ч за первый час симулированного времени.
 5. В Grafana: Explore → InfluxDB → `mqtt_consumer` с тегом `thingId=org.openegiz.pit:crusher-01` — видны точки с полем `value_throughput_tph_properties_value`.

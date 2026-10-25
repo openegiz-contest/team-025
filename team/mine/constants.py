@@ -85,7 +85,7 @@ NODE_ELEVATION_M = {
     "face-ore-01": -45.0,    # bench -45
     "face-ore-02": -60.0,    # bench -60, deeper and leaner
     "face-waste-01": 10.0,   # stripping a bench above the rim
-    "dump-01": 35.0,         # the waste dump is a growing landform
+    "dump-01": 20.0,         # crest of the waste dump, a growing landform
 }
 
 BENCHES = {
