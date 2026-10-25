@@ -56,6 +56,7 @@ def main():
             "tonnes_to_crusher_shift": {"value": 0, "unit": "t"},
             "feed_grade": {"value": 0, "unit": "% Cu"},
             "trucks_active": {"value": 0, "unit": "trucks"},
+            "ore_supply_tph": {"value": 0, "unit": "t/h"},
             "sim_speedup": {"value": c.DEFAULT_SIM_SPEEDUP, "unit": "simulated s / real s"},
         },
     )
@@ -70,6 +71,7 @@ def main():
             "lom_stripping_ratio": {"value": c.LOM_STRIPPING_RATIO, "unit": "t/t"},
             "stripping_ratio_actual": {"value": 0, "unit": "t/t"},
             "waste_tonnes_actual": {"value": 0, "unit": "t"},
+            "ore_tonnes_mined_shift": {"value": 0, "unit": "t"},
             "tonnes_actual": {"value": 0, "unit": "t"},
             "grade_actual": {"value": 0, "unit": "% Cu"},
             "time_remaining_min": {"value": c.SHIFT_HOURS * 60, "unit": "min"},

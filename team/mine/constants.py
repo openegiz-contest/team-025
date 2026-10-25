@@ -60,11 +60,24 @@ TRUCK_AVAILABILITY = 0.85            # ASSUMPTION (no solid source, see design-t
 TRUCK_MTBF_H = 300.0                 # ASSUMPTION
 TRUCK_MTTR_H = 2.0                   # ASSUMPTION
 
-# Fuel burn: Komatsu does not publish a spec-sheet rate (design-twins.md
-# 3.3). These per-km rates are the team's assumption, loosely informed by
-# the (non-comparable, normalized) Mogalakwena case-study figures.
-FUEL_LPKM_LOADED = 4.4               # ASSUMPTION
-FUEL_LPKM_EMPTY = 2.6                # ASSUMPTION
+# Fuel burn: Komatsu does not publish a spec-sheet rate for the 930E-5SE
+# (design-twins.md 3.3), so these are the team's assumption -- but they are
+# back-calculated from the one figure that is not in doubt, the hourly burn of
+# a 2700 hp ultra-class truck, which the literature puts at roughly 250 l/h
+# averaged over a duty cycle.
+#
+# Per-km rather than per-hour because the model only burns fuel while a truck
+# is travelling: an idling truck at a queue burns nothing here. So the per-km
+# figures carry the idle burn too, chosen so a whole Face-1 cycle (4.8 km in
+# 17.0 min) comes to ~71 l, i.e. ~250 l/h over the cycle.
+#
+# The earlier values (4.4 / 2.6) gave 59 l/h -- four times low. Nothing in the
+# model broke, which is exactly why it survived: fuel_pct just crept down so
+# slowly that refuelling needed 61 simulated hours, so `refueling` and the
+# fuel-station twin were unreachable in any session anyone would sit through.
+# At 250 l/h a truck burns about two thirds of its tank in a 12-hour shift.
+FUEL_LPKM_LOADED = 19.5              # ASSUMPTION, see above
+FUEL_LPKM_EMPTY = 10.0               # ASSUMPTION, see above
 REFUEL_BELOW_PCT = 20.0
 REFUEL_SECONDS = 600.0               # ASSUMPTION
 
@@ -216,13 +229,35 @@ FACE_RESERVES_T = {
 LOM_STRIPPING_RATIO = 0.2
 # ASSUMPTION: this section is stripping ahead of its ore benches (face-waste-01
 # sits on bench +10, above the two ore benches it has to uncover), so its own
-# shift plan is well above the life-of-mine average. The figure is the ratio
-# the designed fleet split actually delivers -- ORE_TRUCK_COUNT on ore against
-# WASTE_TRUCK_COUNT on waste -- rather than a target the model cannot meet.
-# Both numbers reach the Stand on shift-01 so the gap is stated, not hidden:
-# a dispatcher reading only the life-of-mine figure would think the section
-# were over-stripping by 3x, when it is doing exactly what it was sent to do.
-PLAN_STRIPPING_RATIO = 0.65
+# shift plan is well above the life-of-mine average.
+#
+# The figure is DERIVED from the designed fleet split rather than declared, for
+# the same reason road grades are: a declared one drifts. It was declared 0.65
+# and described as "what the split delivers"; the split actually delivers 0.52,
+# and nothing caught the gap because nothing recomputed it.
+#
+# Both numbers reach the Stand on shift-01 so the difference is stated, not
+# hidden: a dispatcher reading only the life-of-mine figure would think the
+# section were over-stripping by 2.5x, when it is doing what it was sent to do.
+def _design_stripping_ratio():
+    """Waste t/h over ore t/h that ORE_TRUCK_COUNT / WASTE_TRUCK_COUNT deliver."""
+    load_s = EXCAVATOR_PASSES_TO_FILL * EXCAVATOR_CYCLE_S
+
+    def cycle_s(roads):
+        travel = 0.0
+        for road in roads:
+            grade = road_avg_grade_pct(road)
+            km = ROAD_LENGTHS_KM[road]
+            up = min(TRUCK_MAX_SPEED_KMH,
+                     SPEED_LOADED_KMH_BASE * max(0.5, 1.0 - grade * GRADE_SPEED_PENALTY))
+            travel += (km / up + km / SPEED_EMPTY_KMH_BASE) * 3600.0 / JOB_EFFICIENCY
+        return load_s + SPOT_SECONDS + travel + DUMP_SECONDS
+
+    half = ORE_TRUCK_COUNT // 2
+    tph = lambda n, roads: n * TRUCK_CAPACITY_T * 3600.0 / cycle_s(roads)
+    ore = tph(half, ["road-face1", "road-main-a"]) + tph(ORE_TRUCK_COUNT - half, ["road-face2", "road-main-a"])
+    waste = tph(WASTE_TRUCK_COUNT, ["road-waste"])
+    return round(waste / ore, 2) if ore else 0.0
 
 # -- Stockpile / dump (ASSUMPTION: no source for section-specific sizing).
 STOCKPILE_CAPACITY_T = 5000.0
@@ -248,3 +283,8 @@ def initial_truck_assignment():
         + ["excavator-02"] * (ORE_TRUCK_COUNT - half)
         + ["excavator-03"] * WASTE_TRUCK_COUNT
     )
+
+
+# Evaluated at the end of the module: _design_stripping_ratio() reads the fleet
+# split and the road graph, both declared above.
+PLAN_STRIPPING_RATIO = _design_stripping_ratio()

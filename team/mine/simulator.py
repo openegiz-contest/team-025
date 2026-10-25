@@ -203,7 +203,11 @@ class Crusher:
         self.tonnes_total += tonnes
 
     def windowed(self, now, window_s=3600.0):
-        self.window_log = [e for e in self.window_log if now - e[0] <= window_s]
+        # Strictly less than, not <=: at a 60 s production tick an inclusive
+        # bound keeps 61 ticks in a 3600 s window, which reported 2 897.5 t/h
+        # for a crusher actually drawing 2 850 -- a steady +1.7 % that looked
+        # like physics and was arithmetic.
+        self.window_log = [e for e in self.window_log if now - e[0] < window_s]
         tonnes = sum(t for _, t, _ in self.window_log)
         grade_tonnes = sum(t * g for _, t, g in self.window_log)
         window_hours = min(now, window_s) / 3600.0 or 1.0 / 3600.0
@@ -280,6 +284,11 @@ class Section:
         self.face_reserves = dict(c.FACE_RESERVES_T)
         self.face_mined_shift = {fid: 0.0 for fid in c.FACE_RESERVES_T}
         self.junction_passes_shift = 0
+        # (time, tonnes) of ore actually tipped at the plant -- into the dump
+        # pocket or onto the stockpile, it is supply either way. Measured, not
+        # estimated: the crusher's own throughput is held at its setpoint by
+        # the stockpile, so it says nothing about what the faces are sending.
+        self.ore_supply_log = []
         # (arrival_time, tonnes): what is riding the belt right now. A bucket
         # leaves the crusher at `now` and reaches the plant one transit later.
         self.conveyor_belt = deque()
@@ -321,6 +330,23 @@ class Section:
             if self.roads[rid].state != "closed":
                 return rid
         return None
+
+    def ore_supplied(self, now, tonnes):
+        self.ore_supply_log.append((now, tonnes))
+
+    def ore_supply_tph(self, now, window_s=1200.0):
+        """What the faces are actually delivering to the plant, t/h.
+
+        This is the number a stopped shovel or a closed road moves within a
+        minute, while tonnes_to_crusher_shift keeps climbing at the setpoint
+        off the stockpile. Without it the Stand shows a scenario with no
+        measurable consequence for the better part of an hour.
+        """
+        self.ore_supply_log = [e for e in self.ore_supply_log if now - e[0] < window_s]
+        if not self.ore_supply_log:
+            return 0.0
+        hours = min(now, window_s) / 3600.0
+        return sum(t for _, t in self.ore_supply_log) / hours if hours > 0 else 0.0
 
     def face_has_reserves(self, face_id, tonnes):
         return self.face_reserves.get(face_id, 0.0) >= tonnes
@@ -476,6 +502,7 @@ def truck_process(env, section, truck_id):
                     yield env.timeout(c.DUMP_SECONDS)
                     section.crusher.hopper_pending_t -= truck.payload_t
                     section.crusher.hopper_add(truck.payload_t, truck.grade)
+                    section.ore_supplied(env.now, truck.payload_t)
                     break
                 if section.stockpile.room() >= truck.payload_t:
                     section.stockpile.pending_t += truck.payload_t
@@ -483,6 +510,7 @@ def truck_process(env, section, truck_id):
                     yield env.timeout(c.DUMP_SECONDS)
                     section.stockpile.pending_t -= truck.payload_t
                     section.stockpile.add(truck.payload_t, truck.grade)
+                    section.ore_supplied(env.now, truck.payload_t)
                     break
                 truck.state = "queued_stockpile_full"
                 yield env.timeout(POLL_WAIT_S)
@@ -802,11 +830,14 @@ def build_snapshot(section, now, speedup):
         "tonnes_to_crusher_shift": crusher_feats["tonnes_shift"],
         "feed_grade": crusher_feats["feed_grade"],
         "trucks_active": {"value": active_trucks, "unit": "trucks"},
+        # What the faces are sending, as opposed to what the crusher is eating.
+        "ore_supply_tph": {"value": round(section.ore_supply_tph(now), 1), "unit": "t/h"},
         # Lets the viewer dead-reckon truck motion between SSE ticks instead
         # of only redrawing once per publish (see app.js updateTruckMotion).
         "sim_speedup": {"value": speedup, "unit": "simulated s / real s"},
     }
     tonnes_actual = section.shift_tonnes_actual()
+    ore_mined = sum(section.face_mined_shift.get(f, 0.0) for f in ("face-ore-01", "face-ore-02"))
     elapsed_min = (now - section.shift_start_t) / 60.0
     things["shift-01"] = {
         "plan_tonnes": {"value": round(c.PLAN_TONNES_SHIFT, 1), "unit": "t"},
@@ -814,8 +845,13 @@ def build_snapshot(section, now, speedup):
         "plan_stripping_ratio": {"value": c.PLAN_STRIPPING_RATIO, "unit": "t/t"},
         "lom_stripping_ratio": {"value": c.LOM_STRIPPING_RATIO, "unit": "t/t"},
         "waste_tonnes_actual": {"value": round(section.dump_tonnes_shift, 1), "unit": "t"},
+        "ore_tonnes_mined_shift": {"value": round(ore_mined, 1), "unit": "t"},
+        # Waste over the ore that was MINED, not over the ore that reached the
+        # crusher. Dividing by crusher tonnage leaves out everything sitting on
+        # the stockpile and in the dump pocket, which inflated the published
+        # ratio by about half: 0.76 against a true 0.52.
         "stripping_ratio_actual": {
-            "value": round(section.dump_tonnes_shift / tonnes_actual, 2) if tonnes_actual else 0.0,
+            "value": round(section.dump_tonnes_shift / ore_mined, 2) if ore_mined else 0.0,
             "unit": "t/t",
         },
         "tonnes_actual": {"value": round(tonnes_actual, 1), "unit": "t"},

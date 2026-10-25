@@ -31,6 +31,12 @@
           "unit": "trucks"
         }
       },
+      "ore_supply_tph": {
+        "properties": {
+          "value": 0,
+          "unit": "t/h"
+        }
+      },
       "sim_speedup": {
         "properties": {
           "value": 10.0,
@@ -63,7 +69,7 @@
       },
       "plan_stripping_ratio": {
         "properties": {
-          "value": 0.65,
+          "value": 0.52,
           "unit": "t/t"
         }
       },
@@ -80,6 +86,12 @@
         }
       },
       "waste_tonnes_actual": {
+        "properties": {
+          "value": 0,
+          "unit": "t"
+        }
+      },
+      "ore_tonnes_mined_shift": {
         "properties": {
           "value": 0,
           "unit": "t"

@@ -2167,6 +2167,11 @@ const sideGeo = new THREE.ExtrudeGeometry(sideShape, { depth: 0.16, bevelEnabled
 
 function buildTruckMesh() {
   const group = new THREE.Group();
+  // Yaw first, then pitch about the truck's own lateral axis. With the default
+  // XYZ order rotation.x tilts about the world X, which is the lateral axis
+  // only when the truck faces along Z -- on the loaded main, which runs
+  // roughly along X, the nose went down on the climb.
+  group.rotation.order = "YXZ";
   const root = new THREE.Group();
   root.scale.setScalar(TRUCK_SCALE);
   group.add(root);
@@ -2416,6 +2421,12 @@ const activeSince = {}; // key -> snapshot taken when turned on
 
 function kpiSnapshot() {
   return {
+    // Supply first: it is the number a scenario actually moves. The crusher's
+    // throughput is held at its setpoint by the stockpile for the better part
+    // of an hour, so a snapshot built on it showed a shut-down shovel as "no
+    // change" -- the buffer working exactly as intended, reading as a scenario
+    // that did nothing.
+    supply: fval("section-01", "ore_supply_tph") ?? 0,
     throughput: fval("crusher-01", "throughput_tph") ?? 0,
     plan: fval("shift-01", "plan_completion_pct") ?? 0,
     grade: fval("shift-01", "grade_actual") ?? 0,
@@ -2486,9 +2497,11 @@ function renderScenarios() {
     const before = activeSince[scn.key];
     if (active && before) {
       const now = kpiSnapshot();
+      const drop = before.supply - now.supply;
       el.delta.textContent =
-        `было ${num(before.throughput)} т/ч, план ${num(before.plan)}%` +
-        ` → сейчас ${num(now.throughput)} т/ч, план ${num(now.plan)}%`;
+        `подача с забоев ${num(before.supply)} → ${num(now.supply)} т/ч` +
+        (drop > 50 ? ` (−${num(drop)})` : "") +
+        ` · дробилка ${num(before.throughput)} → ${num(now.throughput)} т/ч`;
     } else {
       el.delta.textContent = "";
     }
@@ -2856,7 +2869,10 @@ function renderAutodispatch() {
     notes.push(`План по содержанию ${num(gradeMin, 2)}% недостижим ни при каком раскладе — показан максимум`);
   }
   if (best.oreTph > intake + 1) {
-    notes.push(`Подача ${num(best.oreTph)} т/ч выше приёма дробилки ${num(intake)} т/ч — излишек уйдёт на склад`);
+    notes.push(
+      `При оптимуме забои дали бы ${num(best.oreTph)} т/ч — выше приёма дробилки ` +
+      `${num(intake)} т/ч, излишек уйдёт на склад`,
+    );
   }
   // While the crusher is stopped nothing the trucks tip becomes plan -- it
   // becomes stockpile. Saying "2 850 т/ч" through a crusher outage would be a
@@ -2897,6 +2913,7 @@ const STATE_RU = {
   waiting_excavator_down: "ждёт экскаватор", down: "отказ", refueling: "заправка",
   serving: "обслуживает", open: "открыта", closed: "закрыта", busy: "занята",
   running: "работает", stopped: "стоит",
+  clear: "свободна", congested: "затор", depleted: "отработан",
 };
 
 const num = (v, digits = 0) =>
@@ -2936,7 +2953,7 @@ function labelInfo(id) {
     case "repair-01":
       return [`${ru} · в ремонте ${num(fval(id, "units_in_repair"))}`, dot];
     case "junction-01":
-      return [`маршрут ${aval(id, "elevation_m") ?? ""} м · ${fval(id, "route_main") || "—"}`, dot];
+      return [`отм. ${num(aval(id, "elevation_m"))} м · руда идёт на ${fval(id, "route_main") || "—"}`, dot];
     default:
       return null;
   }
@@ -3000,7 +3017,31 @@ function renderKPI() {
   const gradeLevel =
     !grade || gradeMin === undefined ? null
       : grade >= gradeMin ? "ok" : grade >= gradeMin - 0.02 ? "warn" : "bad";
-  const tphLevel = tph === undefined ? null : tph > 0 ? "ok" : "bad";
+  // Against the crusher's own rated range, not against zero. The label has
+  // printed "паспорт 2000-3100" all along while the plate went green at 1 t/h,
+  // so the bar said nothing a dispatcher could act on.
+  const tphMin = aval("crusher-01", "rated_tph_min");
+  const tphMax = aval("crusher-01", "rated_tph_max");
+  const tphLevel =
+    tph === undefined || tphMin === undefined || tphMax === undefined ? null
+      : tph <= 0 ? "bad"
+      : tph > tphMax ? "bad"                       // above the machine's rating
+      : tph >= tphMin ? "ok"                       // inside the rated band
+      : tph >= tphMin * 0.75 ? "warn"              // feed-starved but running
+      : "bad";
+  // Supply against what the crusher can take. Below it the section is eating
+  // into the stockpile and the plan starts slipping as soon as the buffer is
+  // gone; above it the surplus is going to the stockpile, which is fine until
+  // the stockpile is full.
+  const supply = fval("section-01", "ore_supply_tph");
+  const intakeTph = aval("shift-01", "plan_tonnes") && f("plan_tonnes")
+    ? f("plan_tonnes") / ((aval("shift-01", "shift_hours") || 12))
+    : 2850;
+  const supplyLevel =
+    supply === undefined ? null
+      : supply >= intakeTph ? "ok"
+      : supply >= intakeTph * 0.8 ? "warn"
+      : "bad";
   const trucksLevel =
     trucks === undefined ? null : trucks === TRUCK_IDS.length ? "ok" : trucks > 0 ? "warn" : "bad";
 
@@ -3020,6 +3061,11 @@ function renderKPI() {
       value: tph === undefined ? "—" : `${num(tph)}`,
       label: `т/ч дробилка · паспорт ${num(aval("crusher-01", "rated_tph_min"))}–${num(aval("crusher-01", "rated_tph_max"))}`,
       level: tphLevel,
+    }),
+    statHTML({
+      value: supply === undefined ? "—" : `${num(supply)}`,
+      label: `т/ч подача с забоев · приём ${num(tph === undefined ? 0 : intakeTph)}`,
+      level: supplyLevel,
     }),
     statHTML({
       value: trucks === undefined ? "—" : `${trucks}/${TRUCK_IDS.length}`,
@@ -3178,6 +3224,11 @@ function updateTrucks(now, dtS) {
     mesh.rotation.y += wrapAngle(pose.heading - mesh.rotation.y) * turnAlpha;
     // Nose up the ramp and down it again. Without this a truck climbing a
     // 10% grade stays dead level and the climb reads as a glitch.
+    // Euler order YXZ: yaw is applied first, so rotation.x then tilts the
+    // truck about its OWN lateral axis. With the default XYZ it tilted about
+    // the world X, which is only the lateral axis when the truck happens to
+    // face along Z -- on the loaded main, running roughly along X, the nose
+    // went down on the climb.
     mesh.rotation.x += ((pose.pitch ?? 0) - mesh.rotation.x) * turnAlpha;
 
     // Roll wheels by distance travelled along the truck's own forward axis.
@@ -3200,7 +3251,7 @@ function updateTrucks(now, dtS) {
     if (dustAccum[id] > 1.3) {
       dustAccum[id] = 0;
       const loaded = (fval(id, "payload_t") ?? 0) > 1;
-      plumes.spawn(mesh.position.x - sinY * 2.6, 0.3, mesh.position.z - cosY * 2.6, {
+      plumes.spawn(mesh.position.x - sinY * 2.6, mesh.position.y + 0.3, mesh.position.z - cosY * 2.6, {
         s0: 1.2, s1: loaded ? 7.5 : 5.5, lifeS: 2.3, a: loaded ? 0.46 : 0.34, rise: 0.6,
       });
     }
@@ -3209,7 +3260,7 @@ function updateTrucks(now, dtS) {
       dumpDust[id] = (dumpDust[id] ?? 0) + dtS;
       if (dumpDust[id] > 0.11) {
         dumpDust[id] = 0;
-        plumes.spawn(mesh.position.x - sinY * 4.4, 0.5, mesh.position.z - cosY * 4.4, {
+        plumes.spawn(mesh.position.x - sinY * 4.4, mesh.position.y + 0.5, mesh.position.z - cosY * 4.4, {
           s0: 1.8, s1: 9, lifeS: 2.8, a: 0.4, rise: 1.4,
         });
       }
@@ -3246,7 +3297,9 @@ function tick() {
       if (digDust[id] > 0.3) {
         digDust[id] = 0;
         const P = EXC_LAYOUT[id].pile;
-        plumes.spawn(P[0], 1.2, P[2], { s0: 1.2, s1: 5.5, lifeS: 2.4, a: 0.24, rise: 0.9 });
+        // P[1] is the bench the shovel works from: a literal height here put
+        // the plume at the rim, 23 units above a machine digging at -45.
+        plumes.spawn(P[0], P[1] + 1.2, P[2], { s0: 1.2, s1: 5.5, lifeS: 2.4, a: 0.24, rise: 0.9 });
       }
     }
   }
