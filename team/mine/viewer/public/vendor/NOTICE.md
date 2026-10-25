@@ -1,6 +1,6 @@
 # Vendored third-party code
 
-Vendored (not CDN-loaded) so the viewer works on a judge's machine without
+Vendored (not CDN-loaded) so the viewer works on any machine without
 outbound internet access during evaluation — same reasoning as this repo's
 vendored Grafana plugins (see ../../../../NOTICE).
 

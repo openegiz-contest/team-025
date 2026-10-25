@@ -253,7 +253,7 @@ scene.add(new THREE.HemisphereLight(0xa9c4dd, 0x5a4a35, 0.42));
 // ---------------------------------------------------------------------------
 
 // Deterministic PRNG: procedural rocks/hills look the same on every reload
-// (and on the judge's machine) instead of reshuffling each time.
+// (and on the evaluator's machine) instead of reshuffling each time.
 function mulberry32(seed) {
   return () => {
     seed |= 0; seed = (seed + 0x6d2b79f5) | 0;
@@ -845,7 +845,7 @@ function updateBeacon(key, active, nowMs) {
 
 // ---------------------------------------------------------------------------
 // Procedural 3D models. Everything is built from Three.js primitives at load
-// time -- no glTF files to vendor, works offline on the judge's machine.
+// time -- no glTF files to vendor, works offline with no network at all.
 // Each pickable object is a Group with userData.id; the parts whose color
 // tracks twin state are listed in userData.colorMats (see setGroupColor).
 // ---------------------------------------------------------------------------
