@@ -40,6 +40,17 @@ def main():
 
     twins["section-01"] = thing(
         "mine-section", "Участок медного карьера (вымышленный, по Актогай)",
+        # Planning parameters live on the twin so that anything reasoning about
+        # the section -- the dispatch optimiser in the viewer, in particular --
+        # reads them from Ditto instead of hardcoding its own copy of the
+        # physics. constants.py stays the single source of truth.
+        attributes={
+            "speed_loaded_kmh": c.SPEED_LOADED_KMH_BASE,
+            "speed_empty_kmh": c.SPEED_EMPTY_KMH_BASE,
+            "job_efficiency": round(c.JOB_EFFICIENCY, 4),
+            "dump_s": c.DUMP_SECONDS,
+            "spot_s": c.SPOT_SECONDS,
+        },
         features={
             "tonnes_to_crusher_shift": {"value": 0, "unit": "t"},
             "feed_grade": {"value": 0, "unit": "% Cu"},
@@ -58,6 +69,7 @@ def main():
             "grade_actual": {"value": 0, "unit": "% Cu"},
             "time_remaining_min": {"value": c.SHIFT_HOURS * 60, "unit": "min"},
             "plan_completion_pct": {"value": 0, "unit": "%"},
+            "shift_number": {"value": 1},
         },
     )
 
@@ -84,13 +96,16 @@ def main():
             attributes={
                 "model": c.EXCAVATOR_MODEL, "bucket_m3": c.EXCAVATOR_BUCKET_M3,
                 "cycle_time_s": c.EXCAVATOR_CYCLE_S,
+                "passes_to_fill": c.EXCAVATOR_PASSES_TO_FILL,
+                # Operator command, never written by the simulator -- see the
+                # ownership split in simulator.py's module docstring.
+                "forced_down": False,
             },
             features={
                 "state": {"value": "idle"},
                 "tonnes_loaded_shift": {"value": 0, "unit": "t"},
                 "passes_total": {"value": 0, "unit": "passes"},
                 "trucks_assigned": {"value": 0, "unit": "trucks"},
-                "forced_down": {"value": False},
             },
         )
 
@@ -104,6 +119,12 @@ def main():
             "haul-truck", truck_id.replace("-", " ").title(), parent="section-01",
             attributes={
                 "model": c.TRUCK_MODEL, "capacity_t": c.TRUCK_CAPACITY_T, "width_m": c.TRUCK_WIDTH_M,
+                # Operator commands. `assigned_excavator` here is the
+                # dispatcher's order; the feature of the same name below is
+                # what the truck is actually working to, which lags the order
+                # until the truck reaches its next safe decision point.
+                "forced_down": False,
+                "assigned_excavator": assigned,
             },
             features={
                 "state": {"value": "queued_at_excavator"},
@@ -114,7 +135,6 @@ def main():
                 "fuel_pct": {"value": 100, "unit": "%"},
                 "assigned_excavator": {"value": assigned},
                 "trips_total": {"value": 0, "unit": "trips"},
-                "forced_down": {"value": False},
             },
         )
 
@@ -132,6 +152,9 @@ def main():
                 "from": frm, "to": to, "priority": priority,
                 "length_km": c.ROAD_LENGTHS_KM[road_id],
                 "max_grade_pct": c.ROAD_MAX_GRADE_PCT, "width_m": c.ROAD_WIDTH_M,
+                # Operator command. The `state` feature below is the
+                # simulator's own read-only mirror of it.
+                "closed": False,
             },
             features={"state": {"value": "open"}, "trucks_on_road": {"value": 0, "unit": "trucks"}},
         )
@@ -156,13 +179,13 @@ def main():
         attributes={
             "model": c.CRUSHER_MODEL,
             "rated_tph_min": c.CRUSHER_RATED_TPH_MIN, "rated_tph_max": c.CRUSHER_RATED_TPH_MAX,
+            "forced_down": False,  # operator command
         },
         features={
             "state": {"value": "idle"},
             "throughput_tph": {"value": 0, "unit": "t/h"},
             "feed_grade": {"value": 0, "unit": "% Cu"},
             "tonnes_shift": {"value": 0, "unit": "t"},
-            "forced_down": {"value": False},
         },
     )
 

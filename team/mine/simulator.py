@@ -9,14 +9,24 @@ face -> junction -> crusher, picking whichever main road segment
 that flow, closing one just lengthens the cycle (see
 ../docs/design-twins.md section 5).
 
-Control loop: this process is the only writer of each twin's descriptive
-`state` (and similar telemetry); an operator never writes `state` on an
-excavator/truck/crusher directly -- they write the dedicated `forced_down`
-boolean instead (polled from Ditto's REST API every tick, immediately
-before that same tick's publish -- not a separate timer, see
-publisher_process for why -- and read fresh at each truck's safe decision
-points). Roads have no competing writer, so their `state` (open/closed) is
-polled and read directly. This is deliberately a poll loop, not a live
+Control loop, and who owns what:
+
+  * `attributes` are the operator's. This process only ever reads them:
+    `closed` on a road, `forced_down` on an excavator/truck/crusher,
+    `assigned_excavator` on a truck.
+  * `features` are this process's. It is the only writer of every twin's
+    descriptive `state` and the rest of the telemetry.
+
+That split is load-bearing, not tidiness. Publishing is a Ditto `modify`
+on `/features`, which replaces every feature of a twin at once, so a
+command that lived in features could be flattened by a publish built
+microseconds before the command landed -- and lost for good, because the
+next poll then read back this process's own stale echo. A `/features`
+modify cannot touch attributes. See DittoPoller.
+
+Commands are polled from Ditto's REST API once per tick, in a single bulk
+request immediately before that same tick's publish, and read fresh again
+at each truck's safe decision points. Deliberately a poll loop, not a live
 Ditto event subscription -- simpler to get right, and a couple of seconds
 of latency is fine for a dispatch demo. See design-twins.md section 5 for
 the trade-off.
@@ -38,6 +48,7 @@ import signal
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 
@@ -72,6 +83,7 @@ class Excavator:
     tonnes_loaded_shift: float = 0.0
     passes_total: int = 0
     repair_eta: float = -1.0
+    repair_forced: bool = False  # this outage was ordered, not random (see reliability_process)
     resource: object = None
 
     def features(self, trucks_assigned):
@@ -80,7 +92,6 @@ class Excavator:
             "tonnes_loaded_shift": {"value": round(self.tonnes_loaded_shift, 1), "unit": "t"},
             "passes_total": {"value": self.passes_total, "unit": "passes"},
             "trucks_assigned": {"value": trucks_assigned, "unit": "trucks"},
-            "forced_down": {"value": self.forced_down},
         }
 
 
@@ -117,13 +128,12 @@ class Truck:
             # truck in 3D; "" when not on any leg (loading/dumping/down/...).
             "current_road": {"value": self.current_road_id if self.state in ("hauling", "returning") else ""},
             "fuel_pct": {"value": round(self.fuel_pct, 1), "unit": "%"},
+            # The excavator this truck is *actually* working to, which is not
+            # the same thing as `attributes.assigned_excavator`: that one is
+            # the dispatcher's order, and it only takes effect at the truck's
+            # next safe decision point. Grafana's fleet table reads this one.
             "assigned_excavator": {"value": self.assigned_excavator},
             "trips_total": {"value": self.trips_total, "unit": "trips"},
-            # Echo back, never a fixed default: a `modify` replaces every
-            # feature at once (see OPENEGIZ.md), so publishing anything else
-            # here would stomp the operator's own forced_down command on its
-            # next poll-publish round trip.
-            "forced_down": {"value": self.forced_down},
         }
 
 
@@ -144,6 +154,7 @@ class Crusher:
     forced_down: bool = False
     tonnes_shift: float = 0.0
     repair_eta: float = -1.0
+    repair_forced: bool = False  # this outage was ordered, not random (see reliability_process)
     window_log: list = field(default_factory=list)  # (sim_time, tonnes, grade), last CRUSHER_WINDOW_S
     hopper_t: float = 0.0     # tipped but not yet "processed" -- smooths bursts, caps throughput_tph
     hopper_grade: float = 0.0
@@ -180,7 +191,6 @@ class Crusher:
             "throughput_tph": {"value": round(tph, 1), "unit": "t/h"},
             "feed_grade": {"value": round(grade, 3), "unit": "% Cu"},
             "tonnes_shift": {"value": round(self.tonnes_shift, 1), "unit": "t"},
-            "forced_down": {"value": self.forced_down},
         }, state
 
 
@@ -226,6 +236,24 @@ class Section:
         self.dump_tonnes_current = 0.0
         self.dump_tonnes_shift = 0.0
         self.shift_tonnes_grade_sum = 0.0  # cumulative, whole shift (unlike crusher.window_log)
+        self.shift_number = 1
+        self.shift_start_t = 0.0
+
+    def start_new_shift(self, now):
+        """Roll the per-shift counters over at the end of a shift.
+
+        Everything that is physically still there -- the stockpile, the
+        tonnage already in the dump, each truck's lifetime trip count --
+        carries over; only what the plan is measured against resets.
+        """
+        self.shift_number += 1
+        self.shift_start_t = now
+        self.crusher.tonnes_shift = 0.0
+        self.shift_tonnes_grade_sum = 0.0
+        self.dump_tonnes_shift = 0.0
+        for exc in self.excavators.values():
+            exc.tonnes_loaded_shift = 0.0
+        log.info("shift %s started at sim %.0f min", self.shift_number, now / 60)
 
     # -- shared helpers used by truck processes ------------------------------
     def choose_open_road(self, candidates):
@@ -370,16 +398,25 @@ def reliability_process(env, section, unit, mtbf_h, mttr_h, idle_state):
     MTTR repair timer; the simulator clears the failure itself when the
     timer elapses, whether the failure was triggered manually or at
     random -- so a what-if demo self-heals instead of staying broken.
+
+    A failure the operator asked for is also cancelled the moment they take
+    the request back, without waiting out the repair timer. Otherwise the
+    "restore" button does nothing visible for the ~4 simulated hours of
+    MTTR, which is not a cancellable scenario in any useful sense. A
+    *random* failure still has to run its repair out -- the operator did
+    not cause it and cannot wish it away.
     """
     while True:
         yield env.timeout(POLL_WAIT_S)
         if unit.state == "down":
-            if env.now >= unit.repair_eta:
+            if (unit.repair_forced and not unit.forced_down) or env.now >= unit.repair_eta:
                 unit.state = idle_state
+                unit.repair_forced = False
             continue
         random_trigger = section.rng.random() < (POLL_WAIT_S / (mtbf_h * 3600.0))
         if unit.forced_down or random_trigger:
             unit.state = "down"
+            unit.repair_forced = unit.forced_down
             mttr_s = max(120.0, section.rng.expovariate(1.0 / (mttr_h * 3600.0)))
             unit.repair_eta = env.now + mttr_s
 
@@ -393,6 +430,20 @@ def face_grade_process(env, section):
         for face_id, target in targets.items():
             g = section.face_grade[face_id] + section.rng.gauss(0, 0.01)
             section.face_grade[face_id] = min(target * 1.15, max(target * 0.85, g))
+
+
+def shift_process(env, section):
+    """End one shift, start the next, forever.
+
+    Without this the shift plan only ever counts up: left running, the Stand
+    settles on something like "260% of plan, 0 minutes remaining", which is
+    not a dispatcher's screen, it is a counter that ran off the end of its
+    scale. At the default 10x speedup a 12-hour shift turns over every ~72
+    real minutes.
+    """
+    while True:
+        yield env.timeout(c.SHIFT_HOURS * 3600.0)
+        section.start_new_shift(env.now)
 
 
 def stockpile_reclaim_process(env, section):
@@ -433,51 +484,73 @@ def crusher_drain_process(env, section):
 # ---------------------------------------------------------------------------
 
 class DittoPoller:
-    def __init__(self, base_url, user, password, timeout_s=3.0):
+    """Reads the operator's commands back out of Ditto.
+
+    Commands live in `attributes` and never in `features`, and that is the
+    whole point. This process publishes a Ditto `modify` on `/features`,
+    which replaces *every* feature of a twin at once. An operator-written
+    value that also lived in features could therefore be flattened by a
+    publish whose snapshot was built just before that write landed -- and
+    since the next poll then reads back our own stale echo, the command was
+    lost for good, with no error anywhere. Confirmed live: closing a road
+    silently failed roughly one try in four.
+
+    A `/features` modify cannot touch attributes, so a command written there
+    always survives. The worst case is now that it takes effect one tick
+    later instead of never.
+    """
+
+    def __init__(self, base_url, user, password, timeout_s=5.0):
         self.base_url = base_url.rstrip("/")
         self.auth = "Basic " + base64.b64encode(f"{user}:{password}".encode()).decode()
         self.timeout_s = timeout_s
 
-    def get_features(self, thing_id):
-        req = urllib.request.Request(
-            f"{self.base_url}/api/2/things/{c.NAMESPACE}:{thing_id}?fields=features",
-            headers={"Authorization": self.auth},
-        )
+    def get_attributes(self, thing_ids):
+        """{short thing id: attributes dict} for many twins in ONE request.
+
+        One request rather than one per twin: 26 sequential round trips every
+        couple of seconds is both needless load and a needlessly wide spread
+        of read times across a single logical poll.
+        """
+        ids = ",".join(f"{c.NAMESPACE}:{tid}" for tid in thing_ids)
+        url = f"{self.base_url}/api/2/things?ids={urllib.parse.quote(ids)}&fields=thingId,attributes"
+        req = urllib.request.Request(url, headers={"Authorization": self.auth})
         with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
-            return json.loads(resp.read()).get("features", {})
+            things = json.loads(resp.read())
+        return {
+            thing.get("thingId", "").split(":", 1)[-1]: (thing.get("attributes") or {})
+            for thing in things
+        }
 
     def poll_into(self, section):
+        ids = list(section.roads) + list(section.excavators) + list(section.trucks) + ["crusher-01"]
+        try:
+            attrs = self.get_attributes(ids)
+        except (urllib.error.URLError, TimeoutError, ValueError, OSError) as err:
+            # Nothing is applied this tick; the next one retries in --interval
+            # seconds. Commands sit in Ditto until then, they are not lost.
+            log.debug("control poll failed: %s", err)
+            return
+
         for road_id, road in section.roads.items():
-            try:
-                feats = self.get_features(road_id)
-                state = feats.get("state", {}).get("properties", {}).get("value")
-                if state in ("open", "closed"):
-                    road.state = state
-            except (urllib.error.URLError, TimeoutError, ValueError, OSError) as exc:
-                log.debug("poll %s failed: %s", road_id, exc)
+            if road_id in attrs:
+                road.state = "closed" if attrs[road_id].get("closed") else "open"
 
         for exc_id, exc in section.excavators.items():
-            try:
-                feats = self.get_features(exc_id)
-                exc.forced_down = bool(feats.get("forced_down", {}).get("properties", {}).get("value", False))
-            except (urllib.error.URLError, TimeoutError, ValueError, OSError) as exc_err:
-                log.debug("poll %s failed: %s", exc_id, exc_err)
+            if exc_id in attrs:
+                exc.forced_down = bool(attrs[exc_id].get("forced_down", False))
 
-        try:
-            feats = self.get_features("crusher-01")
-            section.crusher.forced_down = bool(feats.get("forced_down", {}).get("properties", {}).get("value", False))
-        except (urllib.error.URLError, TimeoutError, ValueError, OSError) as exc_err:
-            log.debug("poll crusher-01 failed: %s", exc_err)
+        if "crusher-01" in attrs:
+            section.crusher.forced_down = bool(attrs["crusher-01"].get("forced_down", False))
 
         for truck_id, truck in section.trucks.items():
-            try:
-                feats = self.get_features(truck_id)
-                truck.forced_down = bool(feats.get("forced_down", {}).get("properties", {}).get("value", False))
-                assigned = feats.get("assigned_excavator", {}).get("properties", {}).get("value")
-                if assigned in EXCAVATOR_INFO:
-                    truck.assigned_excavator = assigned
-            except (urllib.error.URLError, TimeoutError, ValueError, OSError) as exc_err:
-                log.debug("poll %s failed: %s", truck_id, exc_err)
+            attributes = attrs.get(truck_id)
+            if attributes is None:
+                continue
+            truck.forced_down = bool(attributes.get("forced_down", False))
+            assigned = attributes.get("assigned_excavator")
+            if assigned in EXCAVATOR_INFO:
+                truck.assigned_excavator = assigned
 
 
 # ---------------------------------------------------------------------------
@@ -566,13 +639,15 @@ def build_snapshot(section, now, speedup):
         "sim_speedup": {"value": speedup, "unit": "simulated s / real s"},
     }
     tonnes_actual = section.shift_tonnes_actual()
+    elapsed_min = (now - section.shift_start_t) / 60.0
     things["shift-01"] = {
         "plan_tonnes": {"value": round(c.PLAN_TONNES_SHIFT, 1), "unit": "t"},
         "plan_grade_min": {"value": c.PLAN_GRADE_MIN_PCT, "unit": "% Cu"},
         "tonnes_actual": {"value": round(tonnes_actual, 1), "unit": "t"},
         "grade_actual": {"value": round(section.shift_grade_actual(), 3), "unit": "% Cu"},
-        "time_remaining_min": {"value": round(max(0.0, c.SHIFT_HOURS * 60 - now / 60.0), 1), "unit": "min"},
+        "time_remaining_min": {"value": round(max(0.0, c.SHIFT_HOURS * 60 - elapsed_min), 1), "unit": "min"},
         "plan_completion_pct": {"value": round(100.0 * tonnes_actual / c.PLAN_TONNES_SHIFT, 1), "unit": "%"},
+        "shift_number": {"value": section.shift_number},
     }
     return things
 
@@ -580,13 +655,13 @@ def build_snapshot(section, now, speedup):
 def publisher_process(env, section, client, poller, interval_sim_s, args):
     """Poll-then-publish, both in the same tick of the same process.
 
-    They used to be two independent periodic processes. Confirmed live
-    against Ditto that this races: if an unrelated publish fires in the
-    narrow window between an operator's write and the next poll, it
-    overwrites that write with the stale in-memory value, and the next
-    poll then reads back its own stale echo -- the operator's command is
-    silently lost with no error anywhere. Driving both from one timer
-    makes that window impossible (see team/docs/design-twins.md section 7)."""
+    They used to be two independent periodic processes, which raced badly:
+    a publish firing between an operator's write and the next poll
+    overwrote that write, and the poll then read back its own stale echo.
+    One timer narrows that window to the gap between this tick's poll and
+    this tick's publish; keeping the operator's commands in `attributes`,
+    which a `/features` publish cannot reach, closes it altogether (see
+    DittoPoller and team/docs/design-twins.md section 7)."""
     published = 0
     while True:
         yield env.timeout(interval_sim_s)
@@ -662,6 +737,7 @@ def main():
         env.process(reliability_process(env, section, exc, c.EXCAVATOR_MTBF_H, c.EXCAVATOR_MTTR_H, "idle"))
     env.process(reliability_process(env, section, section.crusher, c.CRUSHER_MTBF_H, c.CRUSHER_MTTR_H, "idle"))
     env.process(face_grade_process(env, section))
+    env.process(shift_process(env, section))
     env.process(stockpile_reclaim_process(env, section))
     env.process(crusher_drain_process(env, section))
     for truck_id in section.trucks:

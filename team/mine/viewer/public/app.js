@@ -1,6 +1,11 @@
 import * as THREE from "three";
 import { OrbitControls } from "./vendor/OrbitControls.js";
 import { Sky } from "./vendor/Sky.js";
+import { EffectComposer } from "./vendor/EffectComposer.js";
+import { RenderPass } from "./vendor/RenderPass.js";
+import { UnrealBloomPass } from "./vendor/UnrealBloomPass.js";
+import { OutputPass } from "./vendor/OutputPass.js";
+import { mergeGeometries } from "./vendor/BufferGeometryUtils.js";
 
 const NS = "org.openegiz.pit";
 
@@ -99,13 +104,18 @@ function connectSSE() {
 const fval = (id, feature) => world[id]?.features?.[feature]?.properties?.value;
 const aval = (id, attr) => world[id]?.attributes?.[attr];
 
-async function writeFeature(id, feature, value) {
-  const res = await fetch(`/ditto/api/2/things/${NS}:${id}/features/${feature}/properties/value`, {
+// Operator commands are written to attributes, never to features. The
+// simulator republishes every feature of a twin at once, so a command parked
+// in a feature could be overwritten by a publish that was already in flight
+// -- and then silently lost. Attributes are the one place the simulator never
+// writes. See simulator.py's module docstring.
+async function writeAttribute(id, attribute, value) {
+  const res = await fetch(`/ditto/api/2/things/${NS}:${id}/attributes/${attribute}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(value),
   });
-  if (!res.ok) console.error("write failed", id, feature, res.status, await res.text().catch(() => ""));
+  if (!res.ok) console.error("write failed", id, attribute, res.status, await res.text().catch(() => ""));
 }
 
 // ---------------------------------------------------------------------------
@@ -122,7 +132,7 @@ const scene = new THREE.Scene();
 // road stripes, pads and bench edges z-fought ("textures breaking") as the
 // camera moved. 0.5 / 60000 is ~25x finer.
 const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.5, 60000);
-camera.position.set(90, 95, 140);
+camera.position.set(78, 68, 120);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -131,11 +141,11 @@ renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.05;
+renderer.toneMappingExposure = 0.92;
 container.appendChild(renderer.domElement);
 
 const controls = new OrbitControls(camera, renderer.domElement);
-controls.target.set(-5, 0, 0);
+controls.target.set(-8, 0, -10);
 controls.maxPolarAngle = Math.PI * 0.49;
 controls.minDistance = 30;
 controls.maxDistance = 400;
@@ -144,13 +154,36 @@ controls.dampingFactor = 0.08;
 controls.update();
 
 // ---------------------------------------------------------------------------
+// Post-processing. A restrained bloom so the things that are meant to read as
+// lights -- status lamps, down/closed beacons, the closure barrier's flashers,
+// headlights -- actually glow, while the sunlit ground and machine paint stay
+// below the threshold and never smear.
+// ---------------------------------------------------------------------------
+
+// Own render target purely for `samples: 4`: EffectComposer's default target
+// has no MSAA, so routing through it would quietly throw away the
+// `antialias: true` on the renderer above and bring back jagged bench edges.
+const composerTarget = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: 4 });
+const composer = new EffectComposer(renderer, composerTarget);
+composer.setSize(innerWidth, innerHeight);
+composer.addPass(new RenderPass(scene, camera));
+composer.addPass(new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.45, 0.55, 0.86));
+// Tone mapping and the sRGB conversion have to happen here: three.js applies
+// neither when it renders into a render target, so without this pass the
+// composited image comes out raw linear and washed out.
+composer.addPass(new OutputPass());
+
+// ---------------------------------------------------------------------------
 // Sky, sun and an image-based environment baked from the sky itself, so
 // MeshStandardMaterial/MeshPhysicalMaterial have something real to reflect
 // instead of flat ambient. Low golden-hour sun -- long shadows, warm light,
 // fits an open-pit-in-the-steppe mood better than a neutral midday sky.
 // ---------------------------------------------------------------------------
 
-const SUN_ELEVATION_DEG = 9;
+// 9deg put the sun almost on the horizon: long shadows, but the steppe floor
+// came out near-black and the machines lost all surface detail. 17deg keeps
+// the warm low-sun mood and still lets the ground read.
+const SUN_ELEVATION_DEG = 13;
 const SUN_AZIMUTH_DEG = 145;
 const sunDirection = new THREE.Vector3().setFromSphericalCoords(
   1,
@@ -164,10 +197,10 @@ function setupSky() {
   // (60000), and it still encloses the whole ground plane (half-size 20000).
   sky.scale.setScalar(60000);
   const u = sky.material.uniforms;
-  u.turbidity.value = 8;
-  u.rayleigh.value = 1.2;
-  u.mieCoefficient.value = 0.009;
-  u.mieDirectionalG.value = 0.88;
+  u.turbidity.value = 5.5;
+  u.rayleigh.value = 1.8;
+  u.mieCoefficient.value = 0.007;
+  u.mieDirectionalG.value = 0.85;
   u.sunPosition.value.copy(sunDirection);
 
   // Bake a PMREM environment from the sky alone (a scene of its own, not the
@@ -182,10 +215,14 @@ function setupSky() {
   pmrem.dispose();
 }
 setupSky();
+// One knob for how hard the baked sky lights everything. At full strength the
+// blue dome washes a cold cast over ground, roads and rock -- which is why the
+// haul roads came out looking like pale concrete rather than gravel.
+scene.environmentIntensity = 0.55;
 
-scene.fog = new THREE.Fog(0xcf9d74, 160, 480);
+scene.fog = new THREE.Fog(0xc69c70, 210, 900);
 
-const sun = new THREE.DirectionalLight(0xffc896, 2.2);
+const sun = new THREE.DirectionalLight(0xffd0a0, 2.9);
 // Shadow frustum centered on the pit/junction area (where the actual
 // content is), not world origin -- target first, light offset from *that*.
 sun.target.position.set(0, 0, -20);
@@ -204,7 +241,9 @@ scene.add(sun.target);
 
 // Sky-tint fill so shadowed faces aren't pure black; the environment map
 // above already carries most of the ambient color now, this just softens it.
-scene.add(new THREE.HemisphereLight(0xbfd4e8, 0x33281d, 0.4));
+// Ground term is a warm sand bounce, not near-black, or everything facing
+// away from the sun turns into a silhouette.
+scene.add(new THREE.HemisphereLight(0xa9c4dd, 0x5a4a35, 0.42));
 
 // ---------------------------------------------------------------------------
 // Terrain: textured steppe floor with a real hole cut where the pit is, a
@@ -248,23 +287,46 @@ function roughen(geo, amp, { keepBelowY = -Infinity } = {}) {
   return geo;
 }
 
+// Steppe floor. Drawn in three passes at different blob sizes so the tile
+// carries both broad patchiness and fine grit; a single pass at one size
+// reads as uniform speckle and makes the repeat obvious from the air.
+// Everything wraps (blobs crossing an edge are redrawn on the opposite one),
+// so there is no seam where tiles meet.
 function makeGroundTexture() {
-  const size = 512;
+  const size = 1024;
   const canvas = document.createElement("canvas");
   canvas.width = canvas.height = size;
   const ctx = canvas.getContext("2d");
-  ctx.fillStyle = "#3a3429";
+  ctx.fillStyle = "#5e5038";
   ctx.fillRect(0, 0, size, size);
-  for (let i = 0; i < 2600; i++) {
-    const x = rand() * size, y = rand() * size, r = 3 + rand() * 20;
-    const shade = 0.7 + rand() * 0.55;
-    ctx.fillStyle = `rgba(${Math.floor(70 * shade)},${Math.floor(62 * shade)},${Math.floor(46 * shade)},${0.15 + rand() * 0.2})`;
-    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+
+  const blob = (x, y, r, fill) => {
+    ctx.fillStyle = fill;
+    for (const ox of [-size, 0, size]) {
+      for (const oy of [-size, 0, size]) {
+        ctx.beginPath(); ctx.arc(x + ox, y + oy, r, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+  };
+  const PASSES = [
+    { n: 200, rMin: 70, rMax: 220, a: 0.11 }, // broad patches of lighter/darker ground
+    { n: 620, rMin: 16, rMax: 60, a: 0.16 },  // mid-scale scrub and gravel spreads
+    { n: 2600, rMin: 2, rMax: 9, a: 0.28 },   // grit
+  ];
+  for (const { n, rMin, rMax, a } of PASSES) {
+    for (let i = 0; i < n; i++) {
+      const shade = 0.72 + rand() * 0.62;
+      const g = rand() < 0.22 ? 0.9 : 1; // occasional greener patch of steppe grass
+      blob(
+        rand() * size, rand() * size, rMin + rand() * (rMax - rMin),
+        `rgba(${Math.floor(136 * shade)},${Math.floor(116 * shade * g)},${Math.floor(82 * shade * g * 0.95)},${a * (0.5 + rand())})`,
+      );
+    }
   }
   const tex = new THREE.CanvasTexture(canvas);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
   tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = 4;
+  tex.anisotropy = 8;
   return tex;
 }
 
@@ -274,25 +336,122 @@ function makeGroundTexture() {
 const PIT_CENTER = { x: 0, z: -88 };
 const PIT_RIM_R = 46;
 
-function buildGround() {
-  // Far bigger than the fog distance, so the floor fades into haze at the
-  // true horizon instead of ending in a visible square edge.
-  const half = 20000;
+// The ground is three pieces that meet at exactly y = 0:
+//   1. the graded site -- flat, with the pit cut out of it;
+//   2. a displaced ring of rolling steppe around it;
+//   3. a far flat plane past the fog, so the horizon has no visible edge.
+// The relief stops at the site boundary on purpose. A working bench and its
+// haul roads are graded flat in reality -- undulating ground under a loaded
+// 290-tonne truck would be less true to the object, not more -- and it also
+// means none of the twin-driven placement has to move.
+const SITE_HALF = 260;      // half-width of the graded, flat working area
+const TERRAIN_HALF = 2400;  // outer edge of the displaced ring
+const TERRAIN_SEG = 240;    // 20 m per quad; both boundaries land on grid lines
+
+const groundTexture = (() => {
+  const tex = makeGroundTexture();
+  // ShapeGeometry UVs are raw coordinates, so this is "one tile per 62 metres".
+  // Larger than it needs to be for grain, deliberately: at 34 the tile's broad
+  // patches averaged out into flat mush from any distance, and the only thing
+  // left to see was the repeat.
+  tex.repeat.set(1 / 62, 1 / 62);
+  return tex;
+})();
+// One material for all three pieces, so they are indistinguishable at the seams.
+const groundMaterial = new THREE.MeshStandardMaterial({ map: groundTexture, roughness: 1 });
+
+// Height of the steppe at a point. Zero inside the site and zero again at the
+// outer edge, so the displaced ring meets both flat neighbours exactly.
+function terrainHeight(x, z) {
+  const d = Math.max(Math.abs(x), Math.abs(z));
+  const fade =
+    THREE.MathUtils.smoothstep(d, SITE_HALF, SITE_HALF + 170) *
+    (1 - THREE.MathUtils.smoothstep(d, TERRAIN_HALF - 700, TERRAIN_HALF));
+  if (fade <= 0) return 0;
+  // Wavelengths are chosen against the distance actually on screen: the first
+  // attempt used ~3 km features, which inside the visible few hundred metres
+  // read as one flat slope and looked like no relief at all.
+  return fade * (
+    27 * Math.sin(x * 0.0085 + 1.3) * Math.cos(z * 0.0072 - 0.7) +
+    11 * Math.sin(x * 0.019 - 2.1) * Math.cos(z * 0.017 + 1.9) +
+    4 * Math.sin(x * 0.044 + 0.4) * Math.cos(z * 0.039 - 1.1)
+  );
+}
+
+function buildSiteGround() {
   const shape = new THREE.Shape();
-  shape.moveTo(-half, -half); shape.lineTo(half, -half); shape.lineTo(half, half); shape.lineTo(-half, half); shape.closePath();
+  shape.moveTo(-SITE_HALF, -SITE_HALF); shape.lineTo(SITE_HALF, -SITE_HALF);
+  shape.lineTo(SITE_HALF, SITE_HALF); shape.lineTo(-SITE_HALF, SITE_HALF); shape.closePath();
   const hole = new THREE.Path();
   // Shape Y becomes world -Z after the -90deg X rotation below.
   hole.absarc(PIT_CENTER.x, -PIT_CENTER.z, PIT_RIM_R, 0, Math.PI * 2, true);
   shape.holes.push(hole);
-  const tex = makeGroundTexture();
-  tex.repeat.set(1 / 34, 1 / 34); // ShapeGeometry UVs are raw coordinates
-  const mesh = new THREE.Mesh(new THREE.ShapeGeometry(shape, 72), new THREE.MeshStandardMaterial({ map: tex, roughness: 1 }));
+  const mesh = new THREE.Mesh(new THREE.ShapeGeometry(shape, 72), groundMaterial);
   mesh.rotation.x = -Math.PI / 2;
   mesh.position.y = -0.05;
   mesh.receiveShadow = true;
   return mesh;
 }
-scene.add(buildGround());
+
+function buildTerrainRing() {
+  const step = (TERRAIN_HALF * 2) / TERRAIN_SEG;
+  const cols = TERRAIN_SEG + 1;
+  const position = new Float32Array(cols * cols * 3);
+  const uv = new Float32Array(cols * cols * 2);
+  for (let j = 0; j < cols; j++) {
+    for (let i = 0; i < cols; i++) {
+      const x = -TERRAIN_HALF + i * step;
+      const z = -TERRAIN_HALF + j * step;
+      const k = j * cols + i;
+      position[k * 3] = x;
+      position[k * 3 + 1] = terrainHeight(x, z);
+      position[k * 3 + 2] = z;
+      // Same raw-coordinate UVs as the flat pieces, so the texture runs on
+      // across the seam instead of restarting.
+      uv[k * 2] = x;
+      uv[k * 2 + 1] = -z;
+    }
+  }
+  // Both site boundaries fall exactly on grid lines, so the hole left here is
+  // precisely the square the flat site mesh fills -- no gap, no overlap.
+  const skipFrom = (TERRAIN_HALF - SITE_HALF) / step;
+  const skipTo = (TERRAIN_HALF + SITE_HALF) / step;
+  const index = [];
+  for (let j = 0; j < TERRAIN_SEG; j++) {
+    for (let i = 0; i < TERRAIN_SEG; i++) {
+      if (i >= skipFrom && i < skipTo && j >= skipFrom && j < skipTo) continue;
+      const a = j * cols + i;
+      index.push(a, a + cols, a + cols + 1, a, a + cols + 1, a + 1);
+    }
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(position, 3));
+  geometry.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
+  geometry.setIndex(index);
+  geometry.computeVertexNormals();
+  const mesh = new THREE.Mesh(geometry, groundMaterial);
+  mesh.position.y = -0.05;
+  mesh.receiveShadow = true;
+  return mesh;
+}
+
+function buildFarGround() {
+  const half = 20000;
+  const shape = new THREE.Shape();
+  shape.moveTo(-half, -half); shape.lineTo(half, -half); shape.lineTo(half, half); shape.lineTo(-half, half); shape.closePath();
+  const hole = new THREE.Path();
+  hole.moveTo(-TERRAIN_HALF, -TERRAIN_HALF); hole.lineTo(-TERRAIN_HALF, TERRAIN_HALF);
+  hole.lineTo(TERRAIN_HALF, TERRAIN_HALF); hole.lineTo(TERRAIN_HALF, -TERRAIN_HALF); hole.closePath();
+  shape.holes.push(hole);
+  const mesh = new THREE.Mesh(new THREE.ShapeGeometry(shape), groundMaterial);
+  mesh.rotation.x = -Math.PI / 2;
+  mesh.position.y = -0.05;
+  return mesh;
+}
+
+scene.add(buildSiteGround());
+scene.add(buildTerrainRing());
+scene.add(buildFarGround());
 
 function buildPit() {
   const group = new THREE.Group();
@@ -340,17 +499,80 @@ function buildPit() {
   floor.receiveShadow = true;
   group.add(floor);
 
+  // Radius of the pit wall at a given depth, following the same bench profile
+  // the walls above were built from. The ramp uses it to hug the wall instead
+  // of cutting a chord across open air.
+  function wallRadiusAt(depth) {
+    let rr = PIT_RIM_R, d = 0;
+    for (let i = 0; i < LEVELS; i++) {
+      if (depth <= d + DROP) return rr - WALL_IN * ((depth - d) / DROP);
+      rr -= WALL_IN;
+      d += DROP;
+      if (i < LEVELS - 1) rr -= BENCH;
+    }
+    return rr;
+  }
+
+  // Spiral haul ramp from the rim to the floor. Without a way in and out the
+  // pit reads as a crater; with one it reads as a worked excavation.
+  const totalDepth = LEVELS * DROP;
+  const rampMat = new THREE.MeshStandardMaterial({ color: 0x6d6150, roughness: 1 });
+  const rampAt = (t) => {
+    const depth = totalDepth * t;
+    const a = 3.35 + t * 3.95; // ~225 degrees of turn from rim to floor
+    const rr = wallRadiusAt(depth) - 4.4;
+    return new THREE.Vector3(cx + Math.cos(a) * rr, -depth, cz + Math.sin(a) * rr);
+  };
+  const RAMP_SEGMENTS = 30;
+  let prev = rampAt(0);
+  for (let i = 1; i <= RAMP_SEGMENTS; i++) {
+    const next = rampAt(i / RAMP_SEGMENTS);
+    const dir = new THREE.Vector3().subVectors(next, prev);
+    // Slightly longer than the gap so consecutive slabs overlap and the ramp
+    // has no visible cracks on the outside of each turn.
+    const slab = new THREE.Mesh(new THREE.BoxGeometry(8.5, 0.9, dir.length() * 1.12), rampMat);
+    slab.position.copy(prev).addScaledVector(dir, 0.5);
+    slab.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), dir.clone().normalize());
+    // Deliberately not a shadow caster: 30 slabs is 30 extra draws in the
+    // shadow pass every frame, and each one's shadow falls on the pit wall
+    // directly beneath it, which at this sun angle is already in shadow.
+    slab.receiveShadow = true;
+    group.add(slab);
+    prev = next;
+  }
+
+  // Loose rock on the pit floor, so the bottom is not a clean disc.
+  const rubble = new THREE.InstancedMesh(
+    roughen(new THREE.IcosahedronGeometry(1, 0), 0.24),
+    new THREE.MeshStandardMaterial({ color: 0x6a5c4a, roughness: 1, flatShading: true }),
+    44,
+  );
+  {
+    const m = new THREE.Matrix4(), q = new THREE.Quaternion(), e = new THREE.Euler();
+    const p = new THREE.Vector3(), s = new THREE.Vector3();
+    for (let i = 0; i < 44; i++) {
+      const a = rand() * Math.PI * 2, rr = r * (0.55 + rand() * 0.42);
+      const size = 0.5 + Math.pow(rand(), 2) * 2.2;
+      p.set(cx + Math.cos(a) * rr, y + size * 0.3, cz + Math.sin(a) * rr);
+      q.setFromEuler(e.set(rand() * 3, rand() * 3, rand() * 3));
+      rubble.setMatrixAt(i, m.compose(p, q, s.set(size, size * 0.65, size)));
+    }
+  }
+  rubble.castShadow = rubble.receiveShadow = true;
+  group.add(rubble);
+
   // Copper pits collect blue-green water at the bottom.
   const lake = new THREE.Mesh(
     new THREE.CircleGeometry(r * 0.6, 48),
-    new THREE.MeshPhysicalMaterial({ color: 0x2f7377, roughness: 0.06, metalness: 0.1, clearcoat: 1, clearcoatRoughness: 0.05 }),
+    new THREE.MeshPhysicalMaterial({ color: 0x2f7377, roughness: 0.06, metalness: 0, clearcoat: 1, clearcoatRoughness: 0.05 }),
   );
   lake.rotation.x = -Math.PI / 2;
   lake.position.set(cx + 3, y + 0.06, cz + 2);
   group.add(lake);
   return group;
 }
-scene.add(buildPit());
+const pitGroup = buildPit();
+scene.add(pitGroup);
 
 // Static copy of generate_twins.py road_edges. Used ONLY to place scenery
 // (excavators, muck piles, boulders) at load time -- the live road graph
@@ -427,15 +649,18 @@ function buildDust() {
   const drift = new Float32Array(DUST_COUNT); // per-particle speed + phase packed as speed only; phase derived from index
   for (let i = 0; i < DUST_COUNT; i++) {
     positions[i * 3] = (Math.random() - 0.5) * DUST_BOUNDS * 2;
-    positions[i * 3 + 1] = Math.random() * 16 + 0.3;
+    positions[i * 3 + 1] = Math.pow(Math.random(), 1.8) * 11 + 0.3; // most of it hangs low, the way blown dust does
     positions[i * 3 + 2] = (Math.random() - 0.5) * DUST_BOUNDS * 2 - 20;
     drift[i] = 0.35 + Math.random() * 0.9;
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  // Normal blending, not additive: additive specks read as glowing fireflies
+  // (and get picked up by the bloom pass), while airborne dust should only
+  // ever soften what is behind it.
   const mat = new THREE.PointsMaterial({
-    size: 0.55, map: glowTexture, color: 0xd8c6a3, transparent: true, opacity: 0.28,
-    depthWrite: false, sizeAttenuation: true, blending: THREE.AdditiveBlending,
+    size: 1.5, map: glowTexture, color: 0xcdb99a, transparent: true, opacity: 0.11,
+    depthWrite: false, sizeAttenuation: true, blending: THREE.NormalBlending,
   });
   const points = new THREE.Points(geo, mat);
   points.userData.drift = drift;
@@ -456,6 +681,122 @@ function animateDust(dtS) {
   }
   pos.needsUpdate = true;
 }
+
+// ---------------------------------------------------------------------------
+// Dust plumes: a fixed pool of billboard puffs, recycled oldest-first, drawn
+// in one pass. Trucks raise them from their wheels in proportion to how fast
+// they are actually moving, tipping and loading raise bigger ones. This is
+// what makes a haul cycle read as work rather than as boxes sliding along
+// lines -- a stationary truck raises no dust, a loaded one at speed does.
+// ---------------------------------------------------------------------------
+
+const PLUME_MAX = 460;
+const plumes = (() => {
+  const position = new Float32Array(PLUME_MAX * 3);
+  const velocity = new Float32Array(PLUME_MAX * 3);
+  const size = new Float32Array(PLUME_MAX);
+  const alpha = new Float32Array(PLUME_MAX);
+  const sizeFrom = new Float32Array(PLUME_MAX);
+  const sizeTo = new Float32Array(PLUME_MAX);
+  const peak = new Float32Array(PLUME_MAX);
+  const life = new Float32Array(PLUME_MAX);
+  const lifeMax = new Float32Array(PLUME_MAX);
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(position, 3));
+  geo.setAttribute("size", new THREE.BufferAttribute(size, 1));
+  geo.setAttribute("alpha", new THREE.BufferAttribute(alpha, 1));
+
+  // Custom shader rather than PointsMaterial: puffs need per-particle size and
+  // opacity, and PointsMaterial has only one of each for the whole system.
+  // uFog* replicates scene.fog by hand, which built-in materials get for free
+  // but a raw ShaderMaterial does not -- without it the dust stays sharp and
+  // dark against haze at the far end of a haul road.
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      uMap: { value: glowTexture },
+      // Lighter than the ground it is kicked off, or the plume disappears into
+      // the road it is supposed to be rising from.
+      uColor: { value: new THREE.Color(0xdbcdb0).convertSRGBToLinear() },
+      uFogColor: { value: scene.fog.color.clone().convertSRGBToLinear() },
+      uFogNear: { value: scene.fog.near },
+      uFogFar: { value: scene.fog.far },
+      uScale: { value: innerHeight * 0.5 * Math.min(devicePixelRatio, 2) },
+    },
+    vertexShader: `
+      attribute float size;
+      attribute float alpha;
+      uniform float uScale;
+      varying float vAlpha;
+      varying float vFogDepth;
+      void main() {
+        vAlpha = alpha;
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        vFogDepth = -mv.z;
+        gl_PointSize = size * uScale / max(1.0, -mv.z);
+        gl_Position = projectionMatrix * mv;
+      }
+    `,
+    fragmentShader: `
+      uniform sampler2D uMap;
+      uniform vec3 uColor;
+      uniform vec3 uFogColor;
+      uniform float uFogNear;
+      uniform float uFogFar;
+      varying float vAlpha;
+      varying float vFogDepth;
+      void main() {
+        float a = texture2D(uMap, gl_PointCoord).a * vAlpha;
+        if (a < 0.01) discard;
+        float f = smoothstep(uFogNear, uFogFar, vFogDepth);
+        gl_FragColor = vec4(mix(uColor, uFogColor, f), a);
+      }
+    `,
+    transparent: true,
+    depthWrite: false,
+  });
+
+  const points = new THREE.Points(geo, mat);
+  points.frustumCulled = false;
+  points.renderOrder = 5;
+  scene.add(points);
+
+  let cursor = 0;
+  function spawn(x, y, z, { s0 = 1.2, s1 = 4.5, lifeS = 1.8, a = 0.34, rise = 0.7, drift = 0 } = {}) {
+    const i = cursor;
+    cursor = (cursor + 1) % PLUME_MAX;
+    position[i * 3] = x + (Math.random() - 0.5) * 0.9;
+    position[i * 3 + 1] = y;
+    position[i * 3 + 2] = z + (Math.random() - 0.5) * 0.9;
+    velocity[i * 3] = (Math.random() - 0.5) * 0.7 + drift;
+    velocity[i * 3 + 1] = rise * (0.6 + Math.random() * 0.8);
+    velocity[i * 3 + 2] = (Math.random() - 0.5) * 0.7;
+    sizeFrom[i] = s0;
+    sizeTo[i] = s1 * (0.8 + Math.random() * 0.5);
+    peak[i] = a;
+    lifeMax[i] = life[i] = lifeS * (0.8 + Math.random() * 0.4);
+  }
+
+  function update(dtS) {
+    for (let i = 0; i < PLUME_MAX; i++) {
+      if (life[i] <= 0) { alpha[i] = 0; continue; }
+      life[i] -= dtS;
+      const t = 1 - Math.max(0, life[i]) / lifeMax[i];
+      position[i * 3] += velocity[i * 3] * dtS;
+      position[i * 3 + 1] += velocity[i * 3 + 1] * dtS;
+      position[i * 3 + 2] += velocity[i * 3 + 2] * dtS;
+      velocity[i * 3 + 1] *= 1 - dtS * 0.6; // puffs stop rising as they spread
+      size[i] = sizeFrom[i] + (sizeTo[i] - sizeFrom[i]) * t;
+      // Quick bloom, slow decay -- a dust cloud appears at once and lingers.
+      alpha[i] = peak[i] * Math.min(1, t * 7) * Math.pow(1 - t, 1.6);
+    }
+    geo.attributes.position.needsUpdate = true;
+    geo.attributes.size.needsUpdate = true;
+    geo.attributes.alpha.needsUpdate = true;
+  }
+
+  return { spawn, update, uniforms: mat.uniforms };
+})();
 
 // ---------------------------------------------------------------------------
 // Status beacons: a glowing marker + soft sprite + small point light at any
@@ -548,29 +889,83 @@ function makeBeltTexture() {
 }
 const beltTexBase = makeBeltTexture();
 
+// Haul-road surface. On the road slabs below, U runs along the road and V
+// across it, so the two wheel tracks are horizontal bands here. Each road
+// segment clones this and sets its own repeat, so the grit stays the same
+// physical size whatever the segment's length (see buildRoads).
+function makeRoadTexture() {
+  const W = 256, H = 256;
+  const canvas = document.createElement("canvas");
+  canvas.width = W; canvas.height = H;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#6a5e49";
+  ctx.fillRect(0, 0, W, H);
+
+  // Dusty, lighter shoulders where nothing drives.
+  for (const y0 of [0, H * 0.88]) {
+    const y1 = y0 === 0 ? H * 0.12 : H;
+    const grad = ctx.createLinearGradient(0, y0, 0, y1);
+    grad.addColorStop(y0 === 0 ? 0 : 1, "rgba(131,119,96,0.7)");
+    grad.addColorStop(y0 === 0 ? 1 : 0, "rgba(131,119,96,0)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, y0, W, y1 - y0);
+  }
+  // Two compacted wheel tracks, darker in the middle and feathered at the
+  // edges. Kept shallow on purpose: at full strength the pair reads as the
+  // lane markings of a sealed highway rather than worn gravel.
+  for (const cy of [H * 0.27, H * 0.73]) {
+    const half = H * 0.1;
+    const grad = ctx.createLinearGradient(0, cy - half, 0, cy + half);
+    grad.addColorStop(0, "rgba(74,65,52,0)");
+    grad.addColorStop(0.5, "rgba(74,65,52,0.38)");
+    grad.addColorStop(1, "rgba(74,65,52,0)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, cy - half, W, half * 2);
+  }
+  // Grit, denser off the tracks (the tracks are swept smooth by the tyres).
+  for (let i = 0; i < 2000; i++) {
+    const x = rand() * W, y = rand() * H;
+    const onTrack = Math.min(Math.abs(y - H * 0.27), Math.abs(y - H * 0.73)) < H * 0.08;
+    if (onTrack && rand() < 0.65) continue;
+    const shade = 0.6 + rand() * 0.75;
+    ctx.fillStyle = `rgba(${Math.floor(102 * shade)},${Math.floor(92 * shade)},${Math.floor(74 * shade)},${0.25 + rand() * 0.45})`;
+    ctx.beginPath(); ctx.arc(x, y, 0.6 + rand() * 2.4, 0, Math.PI * 2); ctx.fill();
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 8;
+  return tex;
+}
+const roadTexBase = makeRoadTexture();
+
 const MAT = {
-  paint: new THREE.MeshPhysicalMaterial({ color: 0xe0a32a, roughness: 0.42, metalness: 0.25, clearcoat: 0.6, clearcoatRoughness: 0.3 }),
-  steel: new THREE.MeshStandardMaterial({ color: 0x8a929b, roughness: 0.4, metalness: 0.75 }),
-  steelDark: new THREE.MeshStandardMaterial({ color: 0x2c3036, roughness: 0.6, metalness: 0.55 }),
-  steelDarkDouble: new THREE.MeshStandardMaterial({ color: 0x2c3036, roughness: 0.6, metalness: 0.55, side: THREE.DoubleSide }),
+  paint: new THREE.MeshPhysicalMaterial({ color: 0xe0a32a, roughness: 0.5, metalness: 0, clearcoat: 0.65, clearcoatRoughness: 0.32 }),
+  steel: new THREE.MeshStandardMaterial({ color: 0x8a929b, roughness: 0.45, metalness: 1 }),
+  steelDark: new THREE.MeshStandardMaterial({ color: 0x3a4047, roughness: 0.72, metalness: 1 }),
+  steelDarkDouble: new THREE.MeshStandardMaterial({ color: 0x3a4047, roughness: 0.72, metalness: 1, side: THREE.DoubleSide }),
   chrome: new THREE.MeshStandardMaterial({ color: 0xdfe3e8, roughness: 0.15, metalness: 1 }),
   tire: new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.92, map: makeStripeTexture({ base: "#18191c", line: "#0a0a0c", every: 8, width: 4, repeat: [3, 1] }) }),
   tireWall: new THREE.MeshStandardMaterial({ color: 0x1b1c20, roughness: 0.85 }),
-  hub: new THREE.MeshStandardMaterial({ color: 0xc4c9cf, roughness: 0.35, metalness: 0.8 }),
-  track: new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.85, metalness: 0.4, map: makeStripeTexture({ base: "#2a2b2e", line: "#121314", every: 16, width: 6, repeat: [1, 6] }) }),
-  glass: new THREE.MeshPhysicalMaterial({ color: 0x1f3242, roughness: 0.05, metalness: 0.3, clearcoat: 1, envMapIntensity: 1.8 }),
-  grille: new THREE.MeshStandardMaterial({ color: 0x141518, roughness: 0.6, metalness: 0.4 }),
+  // Dusty wheel hub, not a mirror: at roughness 0.4 a full metal caught the
+  // whole sky and read as a white disc stuck on the tyre.
+  hub: new THREE.MeshStandardMaterial({ color: 0x7d838a, roughness: 0.62, metalness: 1 }),
+  track: new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.88, metalness: 0, map: makeStripeTexture({ base: "#2a2b2e", line: "#121314", every: 16, width: 6, repeat: [1, 6] }) }),
+  glass: new THREE.MeshPhysicalMaterial({ color: 0x1f3242, roughness: 0.05, metalness: 0, clearcoat: 1, envMapIntensity: 2.2 }),
+  grille: new THREE.MeshStandardMaterial({ color: 0x1d2024, roughness: 0.65, metalness: 1 }),
   headlight: new THREE.MeshStandardMaterial({ color: 0xfff6d8, emissive: 0xffe9a8, emissiveIntensity: 1.4, roughness: 0.3 }),
-  concrete: new THREE.MeshStandardMaterial({ color: 0xa39d93, roughness: 0.95 }),
-  white: new THREE.MeshStandardMaterial({ color: 0xe6e6e1, roughness: 0.55, metalness: 0.1 }),
-  cladding: new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.55, metalness: 0.4, map: makeStripeTexture({ base: "#c4cbd3", line: "#939ca6", every: 16, width: 5, repeat: [6, 1] }) }),
-  claddingDouble: new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.55, metalness: 0.4, side: THREE.DoubleSide, map: makeStripeTexture({ base: "#b6bec6", line: "#88919b", every: 16, width: 5, repeat: [12, 3] }) }),
-  tank: new THREE.MeshStandardMaterial({ color: 0xd9dcdf, roughness: 0.35, metalness: 0.6 }),
+  concrete: new THREE.MeshStandardMaterial({ color: 0x968f83, roughness: 0.95 }),
+  // Off-white, not white: against a low warm sun with a sky environment map,
+  // pure white cladding blows out and the buildings read as blank cut-outs.
+  white: new THREE.MeshStandardMaterial({ color: 0xcdc6b7, roughness: 0.62, metalness: 0 }),
+  cladding: new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.62, metalness: 0, map: makeStripeTexture({ base: "#aeb1ab", line: "#84877f", every: 16, width: 5, repeat: [6, 1] }) }),
+  claddingDouble: new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.62, metalness: 0, side: THREE.DoubleSide, map: makeStripeTexture({ base: "#a3a69f", line: "#7b7e76", every: 16, width: 5, repeat: [12, 3] }) }),
+  tank: new THREE.MeshStandardMaterial({ color: 0xd9dcdf, roughness: 0.38, metalness: 1 }),
   ore: new THREE.MeshStandardMaterial({ color: 0x6b5d47, roughness: 1, flatShading: true }),
   // Copper-sulphide ore: greyer/greener than the waste rock, so ore and waste
   // piles are told apart by color alone.
   orePile: new THREE.MeshStandardMaterial({ color: 0x5f5e48, roughness: 1, flatShading: true }),
-  waste: new THREE.MeshStandardMaterial({ color: 0x8a7c69, roughness: 1, flatShading: true }),
+  waste: new THREE.MeshStandardMaterial({ color: 0x796c59, roughness: 1, flatShading: true }),
   gravel: new THREE.MeshStandardMaterial({ color: 0x75685a, roughness: 1 }),
   berm: new THREE.MeshStandardMaterial({ color: 0x5f5242, roughness: 1, flatShading: true }),
   lampRed: new THREE.MeshStandardMaterial({ color: 0xff4433, emissive: 0xff2a1a, emissiveIntensity: 1.5 }),
@@ -581,7 +976,7 @@ const MAT = {
 
 // Paint that follows twin state (setGroupColor writes .color).
 const stateMat = (hex = 0x8b96a3, opts = {}) =>
-  new THREE.MeshPhysicalMaterial({ color: hex, roughness: 0.45, metalness: 0.3, clearcoat: 0.5, clearcoatRoughness: 0.3, ...opts });
+  new THREE.MeshPhysicalMaterial({ color: hex, roughness: 0.52, metalness: 0, clearcoat: 0.55, clearcoatRoughness: 0.32, ...opts });
 // Glowing status lamp/stripe: setGroupColor also writes .emissive for these.
 function glowMat(hex = 0x8b96a3, intensity = 1.2) {
   const m = new THREE.MeshStandardMaterial({ color: hex, emissive: hex, emissiveIntensity: intensity, roughness: 0.4 });
@@ -608,22 +1003,169 @@ function strut(a, b, radius, mat, parent, seg = 8) {
   return m;
 }
 
-function makeLabel(text) {
-  const canvas = document.createElement("canvas");
-  canvas.width = 256; canvas.height = 64;
-  const ctx = canvas.getContext("2d");
-  ctx.fillStyle = "rgba(14,17,22,0.75)";
+// Labels carry the twin's name AND its current headline number, so the scene
+// answers "how much / how fast / how full" on its own instead of sending the
+// viewer to a side panel for every object. Redrawn only when the text
+// actually changes (see updateLabels), not per frame.
+const LABEL_W = 512, LABEL_H = 176;
+const LABEL_FONT = '-apple-system, "Segoe UI", Roboto, sans-serif';
+
+function drawLabel(ctx, title, sub, dot) {
+  ctx.clearRect(0, 0, LABEL_W, LABEL_H);
+  const pad = 8;
+  const h = sub ? LABEL_H - pad * 2 : 98;
+  const y0 = sub ? pad : (LABEL_H - h) / 2;
+  const titleY = y0 + (sub ? 46 : h / 2);
+
+  ctx.fillStyle = "rgba(11,14,19,0.82)";
+  ctx.strokeStyle = "rgba(216,222,230,0.22)";
+  ctx.lineWidth = 3;
   ctx.beginPath();
-  if (ctx.roundRect) ctx.roundRect(2, 6, 252, 52, 12); else ctx.rect(2, 6, 252, 52);
+  if (ctx.roundRect) ctx.roundRect(pad, y0, LABEL_W - pad * 2, h, 22);
+  else ctx.rect(pad, y0, LABEL_W - pad * 2, h);
   ctx.fill();
-  ctx.font = "bold 28px -apple-system, sans-serif"; ctx.fillStyle = "#d8dee6";
-  ctx.textAlign = "center"; ctx.textBaseline = "middle";
-  ctx.fillText(text, 128, 32);
+  ctx.stroke();
+
+  let x = pad + 24;
+  if (dot != null) {
+    ctx.fillStyle = "#" + dot.toString(16).padStart(6, "0");
+    ctx.beginPath(); ctx.arc(x + 12, titleY, 13, 0, Math.PI * 2); ctx.fill();
+    x += 46;
+  }
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  const room = LABEL_W - x - pad - 12;
+  let fs = 46;
+  ctx.font = `bold ${fs}px ${LABEL_FONT}`;
+  while (ctx.measureText(title).width > room && fs > 24) {
+    fs -= 2;
+    ctx.font = `bold ${fs}px ${LABEL_FONT}`;
+  }
+  ctx.fillStyle = "#eef2f7";
+  ctx.fillText(title, x, titleY);
+  if (sub) {
+    let ss = 34;
+    ctx.font = `${ss}px ${LABEL_FONT}`;
+    while (ctx.measureText(sub).width > room && ss > 20) {
+      ss -= 2;
+      ctx.font = `${ss}px ${LABEL_FONT}`;
+    }
+    ctx.fillStyle = "#9fb0c2";
+    ctx.fillText(sub, x, y0 + 114);
+  }
+}
+
+// The shadow pass costs one draw call per casting mesh, every frame, on top
+// of the scene's own. Measured on the live stand it was 418 of 1079 calls --
+// 39% of the frame spent re-drawing, among other things, wheel hubs, lamp
+// housings, handrails and bucket teeth, none of which a viewer could pick out
+// of a shadow. Anything below about half a cubic metre of bounding volume
+// stops casting; the masses that actually shape a machine's shadow (body,
+// bed, tracks, house, boom) are far above the threshold and keep casting.
+const _shadowBox = new THREE.Box3();
+const _shadowSize = new THREE.Vector3();
+function pruneShadowCasters(root, minVolume = 0.5) {
+  root.updateMatrixWorld(true);
+  root.traverse((o) => {
+    if (!o.isMesh || !o.castShadow) return;
+    _shadowBox.setFromObject(o).getSize(_shadowSize);
+    if (_shadowSize.x * _shadowSize.y * _shadowSize.z < minVolume) o.castShadow = false;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Static-geometry merging. Every building here is assembled from dozens of
+// small primitives, and each one is its own draw call, every frame, forever.
+// None of them ever move relative to their building, so after the scene is
+// built their geometries are baked into the group's own space and merged into
+// one mesh per (material, shadow flags). Measured: the plant and roads drop
+// from hundreds of calls to a few dozen.
+//
+// What is deliberately left alone: anything animated (the excavators' rig,
+// the trucks, the stockpile cone and dump mound that scale with tonnage),
+// instanced meshes, and multi-material meshes. Those are marked `noMerge`.
+// ---------------------------------------------------------------------------
+
+const MERGE_ATTRS = ["position", "normal", "uv"];
+
+// Checks obj and every ancestor up to (but not including) root. Root's own
+// flag is about its parent's merge pass, not this one -- a rigid sub-body is
+// marked noMerge so the hull skips it, and is then merged as its own root.
+function hasNoMergeAncestor(obj, root) {
+  for (let n = obj; n && n !== root; n = n.parent) if (n.userData?.noMerge) return true;
+  return false;
+}
+
+function mergeStaticGroup(root) {
+  root.updateMatrixWorld(true);
+  const toLocal = root.matrixWorld.clone().invert();
+  const buckets = new Map();
+  const originals = [];
+
+  root.traverse((o) => {
+    if (!o.isMesh || o.isInstancedMesh || Array.isArray(o.material)) return;
+    if (hasNoMergeAncestor(o, root)) return;
+    const geo = (o.geometry.index ? o.geometry.toNonIndexed() : o.geometry.clone());
+    // Inputs must agree on their attribute set, and the merge rejects a mix of
+    // indexed and non-indexed geometry -- hence toNonIndexed above and this.
+    for (const name of Object.keys(geo.attributes)) {
+      if (!MERGE_ATTRS.includes(name)) geo.deleteAttribute(name);
+    }
+    if (MERGE_ATTRS.some((name) => !geo.attributes[name])) return; // nothing to align it with
+    geo.applyMatrix4(toLocal.clone().multiply(o.matrixWorld));
+
+    const key = `${o.material.uuid}|${o.castShadow}|${o.receiveShadow}`;
+    let bucket = buckets.get(key);
+    if (!bucket) buckets.set(key, (bucket = { material: o.material, cast: o.castShadow, receive: o.receiveShadow, geos: [] }));
+    bucket.geos.push(geo);
+    originals.push(o);
+  });
+
+  let merged = 0;
+  for (const bucket of buckets.values()) {
+    if (bucket.geos.length < 2) continue;
+    const geometry = mergeGeometries(bucket.geos, false);
+    if (!geometry) continue; // incompatible inputs: leave this bucket as separate meshes
+    const mesh = new THREE.Mesh(geometry, bucket.material);
+    mesh.castShadow = bucket.cast;
+    mesh.receiveShadow = bucket.receive;
+    root.add(mesh);
+    for (const geo of bucket.geos) geo.dispose();
+    merged += bucket.geos.length;
+    bucket.done = true;
+  }
+  for (const o of originals) {
+    const key = `${o.material.uuid}|${o.castShadow}|${o.receiveShadow}`;
+    if (buckets.get(key)?.done) o.removeFromParent();
+  }
+  return merged;
+}
+
+const labelSprites = {}; // id -> Sprite with userData.set(title, sub, dotHex)
+
+function makeLabel(title, scale = 1) {
+  const canvas = document.createElement("canvas");
+  canvas.width = LABEL_W; canvas.height = LABEL_H;
+  const ctx = canvas.getContext("2d");
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
-  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false }));
-  sprite.scale.set(14, 3.5, 1);
+  tex.anisotropy = 4;
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true }));
+  const baseW = 10.5 * scale;
+  sprite.userData.baseW = baseW;
+  sprite.scale.set(baseW, (baseW * LABEL_H) / LABEL_W, 1);
   sprite.renderOrder = 10;
+
+  sprite.userData.title = title;
+  let last = null;
+  sprite.userData.set = (t, sub = "", dot = null) => {
+    const key = `${t}|${sub}|${dot}`;
+    if (key === last) return;
+    last = key;
+    drawLabel(ctx, t, sub, dot);
+    tex.needsUpdate = true;
+  };
+  sprite.userData.set(title);
   return sprite;
 }
 
@@ -638,6 +1180,7 @@ function addNode(id, label, group, labelY) {
   const sprite = makeLabel(label);
   sprite.position.set(x, labelY, z);
   scene.add(sprite);
+  labelSprites[id] = sprite;
   pickables.push({ mesh: group, id });
   nodeMeshes[id] = group;
   return group;
@@ -716,9 +1259,11 @@ function buildFaceMesh(exc, isOre) {
   return group;
 }
 
-addNode("face-ore-01", "Забой-1", buildFaceMesh("excavator-01", true), 11);
-addNode("face-ore-02", "Забой-2", buildFaceMesh("excavator-02", true), 11);
-addNode("face-waste-01", "Уступ вскрыши", buildFaceMesh("excavator-03", false), 11);
+// Face labels ride well above the excavator labels below them: both sit over
+// the same patch of ground and at a shallow camera angle they overlap.
+addNode("face-ore-01", "Забой-1", buildFaceMesh("excavator-01", true), 16.5);
+addNode("face-ore-02", "Забой-2", buildFaceMesh("excavator-02", true), 16.5);
+addNode("face-waste-01", "Уступ вскрыши", buildFaceMesh("excavator-03", false), 16.5);
 
 // ---------------------------------------------------------------------------
 // Hydraulic face shovel: crawlers, carbody, slewing house with counterweight
@@ -746,6 +1291,7 @@ function buildExcavatorMesh() {
   part(cylG(1.5, 1.5, 0.35, 24), MAT.steel, 0, 1.75, 0, group);
 
   const turret = new THREE.Group();
+  turret.userData.noMerge = true; // slews; carries the whole boom rig
   turret.position.y = 1.92;
   group.add(turret);
   part(boxG(3.4, 1.7, 4.4), houseMat, 0, 0.85, -0.7, turret);
@@ -758,6 +1304,7 @@ function buildExcavatorMesh() {
   for (const rx of [-1.65, 1.65]) part(boxG(0.05, 0.05, 4.2), MAT.steel, rx, 2.25, -0.7, turret, false); // handrails
 
   const boomPivot = new THREE.Group();
+  boomPivot.userData.noMerge = true; // luffs relative to the turret
   boomPivot.position.set(0.35, 1.5, 1.3);
   turret.add(boomPivot);
   part(boxG(0.75, 0.85, 5.0), MAT.paint, 0, 0, 2.5, boomPivot);
@@ -765,12 +1312,14 @@ function buildExcavatorMesh() {
   for (const rx of [-0.5, 0.5]) strut(new THREE.Vector3(rx, -1.2, 0.2), new THREE.Vector3(rx, -0.3, 2.6), 0.13, MAT.chrome, boomPivot);
 
   const stickPivot = new THREE.Group();
+  stickPivot.userData.noMerge = true;
   stickPivot.position.set(0, 0, 4.9);
   boomPivot.add(stickPivot);
   part(boxG(0.55, 0.6, 3.4), MAT.paint, 0, 0, 1.7, stickPivot);
   strut(new THREE.Vector3(0, 0.55, -1.6), new THREE.Vector3(0, 0.45, 0.6), 0.11, MAT.chrome, stickPivot);
 
   const bucket = new THREE.Group();
+  bucket.userData.noMerge = true;
   bucket.position.set(0, 0, 3.4);
   stickPivot.add(bucket);
   part(boxG(2.1, 0.12, 1.6), MAT.steelDark, 0, -0.75, 0.6, bucket);
@@ -835,9 +1384,10 @@ EXCAVATOR_IDS.forEach((id, i) => {
   mesh.userData.swing = L.swing;
   mesh.userData.phase = i * 0.37;
   scene.add(mesh);
-  const label = makeLabel(id);
-  label.position.set(L.pos[0], 9.5, L.pos[2]);
+  const label = makeLabel(`Экскаватор-${id.slice(-2)}`);
+  label.position.set(L.pos[0], 8.6, L.pos[2]);
   scene.add(label);
+  labelSprites[id] = label;
   pickables.push({ mesh, id });
   nodeMeshes[id] = mesh;
   beacons[id] = createBeacon([L.pos[0], 8.5, L.pos[2]]);
@@ -942,14 +1492,17 @@ function buildStockpileMesh() {
   profile.push(new THREE.Vector2(0.12, 2.68), new THREE.Vector2(0, 2.72)); // rounded crest
   const pileGeo = new THREE.LatheGeometry(profile, 48);
   part(pileGeo, new THREE.MeshStandardMaterial({ color: 0x5f5e48, roughness: 1 }), 0, 0, 0, pile);
+  pile.userData.noMerge = true; // scales with tonnes_current every frame
   group.userData.pile = pile;
   return group;
 }
 addNode("stockpile-01", "Склад руды", buildStockpileMesh(), 10.5);
+let stackerGroup = null; // radial stacker feeding the pile; captured so it can be merged
 {
   const [x, , z] = NODE_POSITIONS["stockpile-01"];
   const stackerFrame = stateMat(0xe0a32a, { clearcoat: 0.3 });
   const stacker = new THREE.Group();
+  stackerGroup = stacker;
   scene.add(stacker);
   const tex = buildConveyorSpan(new THREE.Vector3(4.6, 6.5, 37), new THREE.Vector3(x - 1, 9, z - 0.5), stackerFrame, stacker, 10, 1.3);
   belts.push({ tex, speed: 0.8, isRunning: () => fval("crusher-01", "state") === "crushing" });
@@ -965,6 +1518,7 @@ function buildDumpMesh() {
     part(geo, MAT.waste, 0, y + h / 2, 0, mound);
     y += h;
   }
+  mound.userData.noMerge = true; // scales with the dump's fill level
   group.userData.mound = mound;
   return group;
 }
@@ -1079,13 +1633,63 @@ function roadLengthUnits(id) {
   return roadLengthCache[id];
 }
 
+// A closed road used to be signalled only by recolouring its centre stripe and
+// a beacon. That reads as "a red line" rather than "you cannot drive here", so
+// a closure now also drops a real barrier onto the carriageway: jersey blocks,
+// a striped boom, a no-entry plate and two flashing amber lamps.
+const roadBarriers = {};
+const barrierStripeTex = makeStripeTexture({ base: "#a82114", line: "#e4e0d6", every: 22, width: 11, repeat: [10, 1] });
+
+function buildRoadBarrier(id) {
+  const pose = roadPose(id, 0.14);
+  const group = new THREE.Group();
+  group.position.set(pose.pos[0], 0, pose.pos[2]);
+  group.rotation.y = pose.heading; // local +Z runs from the road's `from` toward its `to`
+  group.visible = false;
+  scene.add(group);
+
+  const half = ROAD_W / 2;
+  part(boxG(ROAD_W + 1.4, 0.45, 0.3), new THREE.MeshStandardMaterial({ map: barrierStripeTex, roughness: 0.8 }), 0, 1.85, 0, group);
+  for (const sx of [-1, 1]) {
+    part(cylG(0.13, 0.16, 2.6, 8), MAT.steelDark, sx * (half + 0.7), 1.3, 0, group);
+    part(boxG(2.3, 0.95, 0.85), MAT.concrete, sx * 2.9, 0.48, -1.4, group);
+  }
+
+  // No-entry plate on its own post, facing the traffic that would arrive here.
+  const sign = new THREE.Group();
+  sign.position.set(half + 2.4, 0, 0);
+  sign.rotation.y = Math.PI;
+  group.add(sign);
+  part(cylG(0.09, 0.09, 3.2, 8), MAT.steelDark, 0, 1.6, 0, sign);
+  part(new THREE.CircleGeometry(0.85, 24), new THREE.MeshStandardMaterial({ color: 0xcc2a1e, roughness: 0.5, side: THREE.DoubleSide }), 0, 3.1, 0.06, sign, false);
+  part(boxG(1.15, 0.26, 0.04), MAT.white, 0, 3.1, 0.1, sign, false);
+
+  const lampMats = [];
+  for (const sx of [-1, 1]) {
+    const mat = glowMat(0xffa21f, 2.2);
+    part(new THREE.SphereGeometry(0.24, 12, 10), mat, sx * (half + 0.7), 2.75, 0, group, false);
+    lampMats.push(mat);
+  }
+  roadBarriers[id] = { group, lampMats };
+}
+
+function updateBarrier(id, closed, nowMs) {
+  const b = roadBarriers[id];
+  if (!b) return;
+  b.group.visible = closed;
+  if (!closed) return;
+  // The two lamps alternate, the way a real closure beacon pair does.
+  const phase = Math.floor(nowMs / 420) % 2;
+  b.lampMats.forEach((mat, i) => { mat.emissiveIntensity = i === phase ? 3.2 : 0.25; });
+}
+
 const roadMeshes = {};
 function buildRoads() {
   ROAD_IDS.forEach((id, roadIndex) => {
     const wp = roadWaypoints(id);
     if (!wp) return;
     const group = new THREE.Group();
-    const stripeMat = glowMat(0x3fb950, 0.45);
+    const stripeMat = glowMat(0x3fb950, 0.3);
     for (let i = 0; i < wp.length - 1; i++) {
       const a = new THREE.Vector3(...wp[i]), b = new THREE.Vector3(...wp[i + 1]);
       const len = a.distanceTo(b);
@@ -1093,10 +1697,13 @@ function buildRoads() {
       seg.position.copy(a).add(b).multiplyScalar(0.5);
       seg.rotation.y = -Math.atan2(b.z - a.z, b.x - a.x);
       group.add(seg);
-      part(boxG(len + ROAD_W * 0.5, 0.3, ROAD_W), MAT.gravel, 0, 0.15, 0, seg, false);
+      const surfaceTex = roadTexBase.clone();
+      surfaceTex.needsUpdate = true;
+      surfaceTex.repeat.set((len + ROAD_W * 0.5) / 11, 1);
+      part(boxG(len + ROAD_W * 0.5, 0.3, ROAD_W), new THREE.MeshStandardMaterial({ map: surfaceTex, roughness: 1 }), 0, 0.15, 0, seg, false);
       // Each road's stripe at its own height: where two roads overlap (junction,
       // crusher end) their stripes would otherwise share a plane and z-fight.
-      part(boxG(len, 0.04, 1.4), stripeMat, 0, 0.33 + roadIndex * 0.015, 0, seg, false);
+      part(boxG(len, 0.04, 0.95), stripeMat, 0, 0.33 + roadIndex * 0.015, 0, seg, false);
       // berms stop short of the ends, leaving room at junctions/loading spots
       const bermLen = len - 16;
       if (bermLen > 2) {
@@ -1108,10 +1715,17 @@ function buildRoads() {
       }
     }
     group.userData.colorMats = [stripeMat];
+    group.userData.id = id;
     scene.add(group);
     roadMeshes[id] = group;
-    const first = wp[0], last = wp[wp.length - 1];
-    beacons[id] = createBeacon([(first[0] + last[0]) / 2, 2.2, (first[2] + last[2]) / 2], 0xff8a3d);
+    pickables.push({ mesh: group, id }); // roads are twins too -- clicking one inspects it
+    const mid = roadPose(id, 0.5).pos;
+    beacons[id] = createBeacon([mid[0], 2.2, mid[2]], 0xff8a3d);
+    const label = makeLabel(id, 0.72);
+    label.position.set(mid[0], 4.6, mid[2]);
+    scene.add(label);
+    labelSprites[id] = label;
+    buildRoadBarrier(id);
   });
 }
 // Called from bootstrap().then(), not here: roadWaypoints() reads
@@ -1207,7 +1821,11 @@ const WHEEL_RADIUS = 0.95;
 const TRUCK_SCALE = 0.8;
 function buildWheel(r, w) {
   const pivot = new THREE.Group(); // rotation.x = roll
-  const tire = new THREE.Mesh(new THREE.CylinderGeometry(r, r, w, 24), [MAT.tire, MAT.tireWall, MAT.tireWall]);
+  pivot.userData.noMerge = true;
+  // One material, not [tread, wall, wall]: a material array makes the renderer
+  // issue one draw call per geometry group, so each tyre cost three instead of
+  // one. Across six trucks that was 144 calls a frame for the wheels alone.
+  const tire = new THREE.Mesh(new THREE.CylinderGeometry(r, r, w, 24), MAT.tire);
   tire.rotation.z = Math.PI / 2;
   tire.castShadow = true;
   pivot.add(tire);
@@ -1249,6 +1867,7 @@ function buildTruckMesh() {
 
   // Tipping body, hinged at the rear of the frame.
   const bodyPivot = new THREE.Group();
+  bodyPivot.userData.noMerge = true; // tips while dumping
   bodyPivot.position.set(0, 1.95, -3.05);
   root.add(bodyPivot);
   part(boxG(3.4, 0.22, 4.6), bodyMat, 0, 0.1, 2.3, bodyPivot);
@@ -1260,6 +1879,12 @@ function buildTruckMesh() {
   const load = part(roughen(new THREE.IcosahedronGeometry(1, 1), 0.18), MAT.ore, 0, 1.05, 2.3, bodyPivot);
   load.scale.set(1.5, 0.7, 2.0);
   load.visible = false;
+
+  // Tail lamps, lit whenever the truck is standing (see updateTrucks). Not in
+  // colorMats: these stay red, they report motion, not twin state.
+  const tailMat = glowMat(0xff2a1a, 0.35);
+  for (const x of [-1.45, 1.45]) part(boxG(0.45, 0.22, 0.06), tailMat, x, 1.25, -3.12, root, false);
+  group.userData.tailMat = tailMat;
 
   group.userData.colorMats = [bodyMat];
   group.userData.wheels = wheels;
@@ -1275,7 +1900,15 @@ for (const id of TRUCK_IDS) {
   scene.add(mesh);
   pickables.push({ mesh, id });
   truckMeshes[id] = mesh;
+  // Hidden from the overview camera (see updateTrucks) -- six moving labels
+  // would clutter the wide shot, but up close they are how you tell which
+  // truck the dispatch panel just reassigned.
+  const label = makeLabel(id, 0.62);
+  label.visible = false;
+  scene.add(label);
+  labelSprites[id] = label;
 }
+const TRUCK_LABEL_MAX_DIST = 90;
 
 // Per-truck dead-reckoning state: the simulator only pushes a new
 // route_position_km roughly once per SIM_INTERVAL (2s default), so drawing
@@ -1310,30 +1943,129 @@ function findPickableId(object) {
 
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
-renderer.domElement.addEventListener("click", (ev) => {
-  pointer.x = (ev.clientX / innerWidth) * 2 - 1;
-  pointer.y = -(ev.clientY / innerHeight) * 2 + 1;
+
+// Built once after the roads are in (they are added to `pickables` only after
+// bootstrap). Rebuilding this inside the pointer handler allocated a fresh
+// array on every mouse event for a list that never changes.
+let pickableMeshes = [];
+const refreshPickables = () => { pickableMeshes = pickables.map((p) => p.mesh); };
+
+function pickAt(clientX, clientY) {
+  pointer.x = (clientX / innerWidth) * 2 - 1;
+  pointer.y = -(clientY / innerHeight) * 2 + 1;
   raycaster.setFromCamera(pointer, camera);
-  const hits = raycaster.intersectObjects(pickables.map((p) => p.mesh), true);
-  if (!hits.length) return;
-  const id = findPickableId(hits[0].object);
-  if (id) renderInspect(id);
+  const hits = raycaster.intersectObjects(pickableMeshes, true);
+  return hits.length ? findPickableId(hits[0].object) : null;
+}
+
+let selectedId = null;
+renderer.domElement.addEventListener("click", (ev) => {
+  const id = pickAt(ev.clientX, ev.clientY);
+  if (id) {
+    selectedId = id;
+    renderInspect(id);
+  }
 });
 
-function renderInspect(id) {
-  const t = world[id];
-  const body = document.getElementById("inspect-body");
-  if (!t) { body.textContent = "Нет данных."; return; }
-  const rows = [];
-  for (const [k, v] of Object.entries(t.attributes || {})) {
-    if (k.startsWith("_")) continue;
-    rows.push(`<tr><td>${k}</td><td>${v}</td></tr>`);
+// Hover feedback, so it is discoverable that scene objects are clickable at
+// all. The handler only records where the pointer is; the raycast itself runs
+// once per frame from the render loop (see updateHover). Raycasting straight
+// out of `pointermove` meant a full recursive walk of every pickable's
+// descendants per *event* -- hundreds of times a second on a trackpad, all of
+// it on the main thread, for a cursor shape.
+let hoverX = 0, hoverY = 0, hoverDirty = false;
+renderer.domElement.addEventListener("pointermove", (ev) => {
+  hoverX = ev.clientX;
+  hoverY = ev.clientY;
+  hoverDirty = true;
+});
+function updateHover() {
+  if (!hoverDirty) return;
+  hoverDirty = false;
+  renderer.domElement.style.cursor = pickAt(hoverX, hoverY) ? "pointer" : "default";
+}
+
+// Marker under whatever is selected. Trucks move, so it is repositioned every
+// frame (see updateSelection) rather than placed once at click time.
+const selectionRing = (() => {
+  const g = new THREE.Group();
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(0.84, 1, 64),
+    // forceSinglePass: a transparent DoubleSide material is otherwise drawn
+    // twice, back faces then front, for a ring only ever seen from above.
+    new THREE.MeshBasicMaterial({ color: 0x58a6ff, transparent: true, opacity: 0.95, side: THREE.DoubleSide, forceSinglePass: true, depthWrite: false }),
+  );
+  ring.rotation.x = -Math.PI / 2;
+  g.add(ring);
+  const glow = new THREE.Mesh(
+    new THREE.CircleGeometry(1, 48),
+    new THREE.MeshBasicMaterial({ map: glowTexture, color: 0x58a6ff, transparent: true, opacity: 0.22, blending: THREE.AdditiveBlending, depthWrite: false }),
+  );
+  glow.rotation.x = -Math.PI / 2;
+  glow.position.y = -0.01;
+  g.add(glow);
+  g.visible = false;
+  g.renderOrder = 4;
+  scene.add(g);
+  return g;
+})();
+
+const selectRadiusCache = {};
+function selectRadius(id, mesh) {
+  if (selectRadiusCache[id] === undefined) {
+    const size = new THREE.Box3().setFromObject(mesh).getSize(new THREE.Vector3());
+    selectRadiusCache[id] = Math.max(2.5, Math.max(size.x, size.z) * 0.62);
   }
+  return selectRadiusCache[id];
+}
+
+function updateSelection(nowMs) {
+  const mesh = selectedId && (truckMeshes[selectedId] || nodeMeshes[selectedId] || roadMeshes[selectedId]);
+  if (!mesh) { selectionRing.visible = false; return; }
+  selectionRing.visible = true;
+  let radius;
+  if (roadMeshes[selectedId]) {
+    // A road's bounding box is the whole road; ring it at its midpoint instead.
+    const p = roadPose(selectedId, 0.5).pos;
+    selectionRing.position.set(p[0], 0.42, p[2]);
+    radius = 6.5;
+  } else {
+    selectionRing.position.set(mesh.position.x, 0.14, mesh.position.z);
+    radius = selectRadius(selectedId, mesh);
+  }
+  selectionRing.scale.setScalar(radius * (1 + 0.05 * Math.sin(nowMs / 320)));
+}
+
+// Attributes an operator may write. Marked in the card so it is obvious which
+// rows are commands and which are the simulator's own readings.
+const COMMAND_ATTRS = new Set(["closed", "forced_down", "assigned_excavator"]);
+const esc = (s) =>
+  String(s).replace(/[&<>"]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch]));
+
+function renderInspect(id) {
+  const body = document.getElementById("inspect-body");
+  if (!id) { body.textContent = "Кликните по объекту на сцене."; return; }
+  const t = world[id];
+  if (!t) { body.textContent = "Нет данных."; return; }
+
+  const attrs = [];
+  for (const [k, v] of Object.entries(t.attributes || {})) {
+    if (k.startsWith("_") || k === "name" || k === "kind") continue;
+    attrs.push(`<tr class="${COMMAND_ATTRS.has(k) ? "cmd" : ""}"><td>${esc(k)}</td><td>${esc(v)}</td></tr>`);
+  }
+  const feats = [];
   for (const [k, f] of Object.entries(t.features || {})) {
     const p = f.properties || {};
-    rows.push(`<tr><td>${k}</td><td>${p.value}${p.unit ? " " + p.unit : ""}</td></tr>`);
+    feats.push(`<tr><td>${esc(k)}</td><td>${esc(p.value)}${p.unit ? " " + esc(p.unit) : ""}</td></tr>`);
   }
-  body.innerHTML = `<b>${NS}:${id}</b><table>${rows.join("")}</table>`;
+
+  const group = (label, rows) =>
+    rows.length ? `<tr><td class="grp" colspan="2">${label}</td></tr>${rows.join("")}` : "";
+
+  body.innerHTML =
+    `<div class="title">${esc(t.attributes?.name || id)}</div>` +
+    `<div class="tid">${esc(NS)}:${esc(id)}</div>` +
+    `<table>${group("Атрибуты · ⌁ команда", attrs)}${group("Признаки · телеметрия", feats)}</table>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1341,12 +2073,12 @@ function renderInspect(id) {
 // ---------------------------------------------------------------------------
 
 const SCENARIOS = [
-  { key: "exc1", label: "Отказ экскаватора-01", undo: "Восстановить экскаватор-01", things: ["excavator-01"], feature: "forced_down", on: true, off: false },
-  { key: "exc2", label: "Отказ экскаватора-02", undo: "Восстановить экскаватор-02", things: ["excavator-02"], feature: "forced_down", on: true, off: false },
-  { key: "roadA", label: "Закрыть основную дорогу (road-main-a)", undo: "Открыть road-main-a", things: ["road-main-a"], feature: "state", on: "closed", off: "open" },
-  { key: "roadB", label: "Закрыть резервную дорогу (road-main-b)", undo: "Открыть road-main-b", things: ["road-main-b"], feature: "state", on: "closed", off: "open" },
-  { key: "crusher", label: "Остановить дробилку", undo: "Запустить дробилку", things: ["crusher-01"], feature: "forced_down", on: true, off: false },
-  { key: "shortage", label: "Вывести truck-05 и truck-06", undo: "Вернуть truck-05 и truck-06", things: ["truck-05", "truck-06"], feature: "forced_down", on: true, off: false },
+  { key: "exc1", title: "Экскаватор-01", label: "Отказ экскаватора-01", undo: "Восстановить экскаватор-01", things: ["excavator-01"], attr: "forced_down", on: true, off: false },
+  { key: "exc2", title: "Экскаватор-02", label: "Отказ экскаватора-02", undo: "Восстановить экскаватор-02", things: ["excavator-02"], attr: "forced_down", on: true, off: false },
+  { key: "roadA", title: "Основная дорога", label: "Закрыть основную дорогу (road-main-a)", undo: "Открыть road-main-a", things: ["road-main-a"], attr: "closed", on: true, off: false },
+  { key: "roadB", title: "Резервная дорога", label: "Закрыть резервную дорогу (road-main-b)", undo: "Открыть road-main-b", things: ["road-main-b"], attr: "closed", on: true, off: false },
+  { key: "crusher", title: "Дробилка", label: "Остановить дробилку", undo: "Запустить дробилку", things: ["crusher-01"], attr: "forced_down", on: true, off: false },
+  { key: "shortage", title: "Нехватка самосвалов", label: "Вывести truck-05 и truck-06", undo: "Вернуть truck-05 и truck-06", things: ["truck-05", "truck-06"], attr: "forced_down", on: true, off: false },
 ];
 const activeSince = {}; // key -> snapshot taken when turned on
 
@@ -1362,7 +2094,7 @@ async function applyScenario(scn, on) {
   if (on) activeSince[scn.key] = kpiSnapshot();
   else delete activeSince[scn.key];
   const value = on ? scn.on : scn.off;
-  await Promise.all(scn.things.map((id) => writeFeature(id, scn.feature, value)));
+  await Promise.all(scn.things.map((id) => writeAttribute(id, scn.attr, value)));
 }
 
 // Built ONCE: the buttons themselves never get destroyed/recreated again.
@@ -1374,6 +2106,19 @@ async function applyScenario(scn, on) {
 function initScenarios() {
   const body = document.getElementById("scenarios-body");
   for (const scn of SCENARIOS) {
+    const wrap = document.createElement("div");
+    wrap.className = "scn";
+
+    const head = document.createElement("div");
+    head.className = "head";
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = scn.title;
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    chip.textContent = "активен";
+    head.append(name, chip);
+
     const row = document.createElement("div");
     row.className = "row";
     const onBtn = document.createElement("button");
@@ -1381,29 +2126,39 @@ function initScenarios() {
     onBtn.onclick = () => applyScenario(scn, true);
     const offBtn = document.createElement("button");
     offBtn.textContent = scn.undo;
-    offBtn.className = "undo";
     offBtn.onclick = () => applyScenario(scn, false);
     row.append(onBtn, offBtn);
-    body.appendChild(row);
 
     const delta = document.createElement("div");
-    delta.className = "scenario-delta";
-    delta.id = `delta-${scn.key}`;
-    delta.style.cssText = "color:var(--dim);font-size:11px;margin:0 0 4px 2px;min-height:14px;";
-    body.appendChild(delta);
+    delta.className = "delta";
+
+    wrap.append(head, row, delta);
+    body.appendChild(wrap);
+    scn.el = { wrap, onBtn, offBtn, delta };
   }
 }
 initScenarios(); // static DOM, doesn't need twin data -- clickable immediately on load
 
 function renderScenarios() {
   for (const scn of SCENARIOS) {
-    const delta = document.getElementById(`delta-${scn.key}`);
-    if (!delta) continue;
-    if (activeSince[scn.key]) {
-      const now = kpiSnapshot(), before = activeSince[scn.key];
-      delta.textContent = `было ${before.throughput.toFixed(0)} т/ч, план ${before.plan.toFixed(0)}% → сейчас ${now.throughput.toFixed(0)} т/ч, план ${now.plan.toFixed(0)}%`;
+    const el = scn.el;
+    if (!el) continue;
+    // Read back from the twins rather than from a local flag: after a reload,
+    // or if someone flips the attribute straight from the Twins app, the
+    // panel still tells the truth about what is currently perturbed.
+    const active = scn.things.every((id) => aval(id, scn.attr) === scn.on);
+    el.wrap.classList.toggle("active", active);
+    el.onBtn.disabled = active;
+    el.offBtn.disabled = !active;
+
+    const before = activeSince[scn.key];
+    if (active && before) {
+      const now = kpiSnapshot();
+      el.delta.textContent =
+        `было ${num(before.throughput)} т/ч, план ${num(before.plan)}%` +
+        ` → сейчас ${num(now.throughput)} т/ч, план ${num(now.plan)}%`;
     } else {
-      delta.textContent = "";
+      el.delta.textContent = "";
     }
   }
 }
@@ -1420,21 +2175,42 @@ function renderDispatch() {
       row = document.createElement("div");
       row.className = "truck-row";
       row.id = `dispatch-${id}`;
+      const dot = document.createElement("span");
+      dot.className = "dot";
       const label = document.createElement("span");
+      label.className = "id";
       label.textContent = id;
+      const state = document.createElement("span");
+      state.className = "st";
       const select = document.createElement("select");
       for (const exc of EXCAVATOR_IDS) {
         const opt = document.createElement("option");
         opt.value = exc; opt.textContent = exc.replace("excavator-", "Э-");
         select.appendChild(opt);
       }
-      select.onchange = () => writeFeature(id, "assigned_excavator", select.value);
-      row.append(label, select);
+      select.onchange = () => writeAttribute(id, "assigned_excavator", select.value);
+      row.append(dot, label, state, select);
       body.appendChild(row);
     }
     const select = row.querySelector("select");
-    const current = fval(id, "assigned_excavator");
-    if (document.activeElement !== select && current && select.value !== current) select.value = current;
+    // The dispatcher's own order (attribute), not the excavator the truck is
+    // still working to (feature of the same name): reading the feature here
+    // would snap the dropdown back for the second or two it takes the truck
+    // to reach a safe point and actually switch.
+    const ordered = aval(id, "assigned_excavator");
+    const working = fval(id, "assigned_excavator");
+    if (document.activeElement !== select && ordered && select.value !== ordered) select.value = ordered;
+
+    // Those same seconds, made visible instead of looking like a dead control.
+    const pending = Boolean(ordered && working && ordered !== working);
+    row.classList.toggle("pending", pending);
+    select.title = pending
+      ? `Приказ: ${ordered}. Самосвал пока работает на ${working}, переключится на ближайшей безопасной точке цикла.`
+      : "";
+
+    const state = fval(id, "state");
+    row.querySelector(".st").textContent = pending ? "переназначается" : (STATE_RU[state] ?? state ?? "");
+    row.querySelector(".dot").style.background = `#${colorFor(state).toString(16).padStart(6, "0")}`;
   }
 }
 
@@ -1469,39 +2245,502 @@ function renderRecommendation() {
 }
 
 // ---------------------------------------------------------------------------
-// KPI bar
+// Автодиспетчер -- advisory fleet-allocation optimiser.
+//
+// The Concept names one decision: how to redistribute the trucks when
+// something fails or a road closes, so the shift still makes its tonnage AND
+// its copper grade. This module computes that answer instead of leaving it to
+// the eye. It is strictly advisory -- it never writes to Ditto. The manual
+// dispatch panel next to it is how the advice gets applied.
+//
+// Two halves:
+//   1. An exact search. Only the COUNT per excavator matters, not which truck
+//      goes where, so six trucks over three excavators is 28 arrangements --
+//      all of them are evaluated, every tick. No heuristic, no learned model,
+//      nothing a reader cannot recompute by hand.
+//   2. Calibration against reality. The closed-form cycle below knows nothing
+//      about queueing at the shovel, waiting at the junction, refuelling, or
+//      the crusher backing up -- but the stand produces all of those. So the
+//      realised cycle time is measured from the telemetry and used in place of
+//      the theoretical one once there are enough samples.
+//
+// Every physical parameter is read from the twins (road lengths, bucket
+// passes, shovel cycle, speeds, job efficiency); constants.py stays the single
+// source of truth and nothing is duplicated here.
 // ---------------------------------------------------------------------------
 
-function renderKPI() {
-  const shift = (id, unit = "") => {
-    const v = fval("shift-01", id);
-    return v === undefined ? "—" : `${v}${unit}`;
+const EXC_LABEL = { "excavator-01": "Э-01", "excavator-02": "Э-02", "excavator-03": "Э-03" };
+
+const cycleTheory = {}; // excId -> closed-form cycle seconds, last computed
+const cycleObs = {};    // excId -> { ema, n } realised cycle seconds
+const tripWatch = {};   // truckId -> { trips, atMs, exc } at its last completed trip
+
+// The haul route as a list of legs, each leg being the roads that could carry
+// it. Derived from the road twins' own from/to attributes rather than a second
+// hardcoded copy of the topology (same source roadWaypoints uses).
+function haulLegs(excId) {
+  const face = EXCAVATOR_FACE[excId];
+  const access = ROAD_IDS.find((r) => aval(r, "from") === face);
+  if (!access) return null;
+  const legs = [[access]];
+  const onward = ROAD_IDS.filter((r) => aval(r, "from") === aval(access, "to"));
+  if (onward.length) legs.push(onward);
+  return legs;
+}
+
+function cycleModel(excId) {
+  const face = EXCAVATOR_FACE[excId];
+  const isWaste = aval(face, "ore_type") === "waste";
+  const base = { excId, isWaste, usable: false };
+
+  if (fval(excId, "state") === "down") return { ...base, reason: "в отказе" };
+  const legs = haulLegs(excId);
+  if (!legs) return { ...base, reason: "нет маршрута" };
+
+  const capacity = aval(TRUCK_IDS[0], "capacity_t") || 290;
+  const loadS = (aval(excId, "passes_to_fill") || 4) * (aval(excId, "cycle_time_s") || 29);
+  const spotS = aval("section-01", "spot_s") ?? 30;
+  const dumpS = aval("section-01", "dump_s") ?? 90;
+  const eff = aval("section-01", "job_efficiency") || 0.8333;
+  const vLoaded = aval("section-01", "speed_loaded_kmh") || 25;
+  const vEmpty = aval("section-01", "speed_empty_kmh") || 35;
+
+  // Ruling grade costs speed, and each road twin publishes its own. Without
+  // this the model ran the fleet ~15% faster than the mine actually does.
+  const gradePenalty = (roadId) =>
+    Math.max(0.6, 1 - ((aval(roadId, "max_grade_pct") ?? 0) / 100) * 1.5);
+
+  let travelS = 0;
+  for (const leg of legs) {
+    const open = leg.filter((r) => fval(r, "state") !== "closed");
+    if (!open.length) return { ...base, reason: `закрыта ${leg.join(" и ")}` };
+    // A truck takes whichever open road on this leg is *quickest*, which is
+    // not always the shortest once the ruling grade differs between them.
+    travelS += Math.min(...open.map((r) => {
+      const km = aval(r, "length_km") ?? 0;
+      const g = gradePenalty(r);
+      return ((km / (vLoaded * g)) + (km / (vEmpty * g))) * 3600 / eff;
+    }));
+  }
+  const theoreticalS = loadS + spotS + travelS + dumpS;
+  cycleTheory[excId] = theoreticalS;
+
+  const obs = cycleObs[excId];
+  const calibrated = Boolean(obs && obs.n >= 3);
+  return {
+    ...base,
+    usable: true,
+    grade: isWaste ? 0 : (fval(face, "grade") ?? 0),
+    capacity,
+    serviceS: loadS + spotS,         // how often the shovel can turn a truck round
+    cycleS: calibrated ? obs.ema : theoreticalS,
+    calibrated,
   };
-  document.getElementById("kpi").innerHTML = `
-    <div class="stat"><span class="v">${shift("plan_completion_pct", "%")}</span><span class="l">план смены</span></div>
-    <div class="stat"><span class="v">${shift("tonnes_actual")}</span><span class="l">т на дробилку (план ${shift("plan_tonnes")})</span></div>
-    <div class="stat"><span class="v">${shift("grade_actual", "% Cu")}</span><span class="l">содержание (мин. план ${fval("shift-01", "plan_grade_min") ?? "—"}%)</span></div>
-    <div class="stat"><span class="v">${fval("crusher-01", "throughput_tph") ?? "—"} т/ч</span><span class="l">дробилка сейчас</span></div>
-    <div class="stat"><span class="v">${fval("section-01", "trucks_active") ?? "—"}</span><span class="l">самосвалов активно</span></div>
-    <div class="stat"><span class="v">${shift("time_remaining_min")}</span><span class="l">минут до конца смены</span></div>
+}
+
+// A truck's trips_total ticking up is one completed cycle. Timed in real
+// milliseconds, converted to simulated seconds through the section's own
+// sim_speedup, and attributed to the excavator it was actually working.
+function observeCycles(nowMs) {
+  const speedup = fval("section-01", "sim_speedup") || 10;
+  for (const id of TRUCK_IDS) {
+    const trips = fval(id, "trips_total");
+    const exc = fval(id, "assigned_excavator");
+    if (typeof trips !== "number" || !exc) continue;
+
+    const prev = tripWatch[id];
+    if (!prev) { tripWatch[id] = { trips, atMs: nowMs, exc, primed: false }; continue; }
+    if (trips === prev.trips) continue; // still mid-cycle
+    const laps = Math.max(1, trips - prev.trips);
+    const simS = (((nowMs - prev.atMs) / 1000) * speedup) / laps;
+    tripWatch[id] = { trips, atMs: nowMs, exc, primed: true };
+
+    // The very first interval after the page loads runs from an arbitrary
+    // moment mid-cycle to the next tip, so it is a fragment of a cycle, not a
+    // cycle. Seeding the average with it made measured times come out ~35%
+    // SHORTER than theory, which is backwards -- theory ignores queueing and
+    // must be the optimistic one. Only intervals between two observed tips
+    // count.
+    if (!prev.primed) continue;
+    if (prev.exc !== exc) continue;                  // reassigned mid-cycle: not a clean sample
+    const theory = cycleTheory[exc];
+    if (!theory || simS <= 0 || simS > theory * 5) continue; // a stall or a repair, not a cycle
+
+    const obs = cycleObs[exc] || (cycleObs[exc] = { ema: simS, n: 0 });
+    obs.ema += (simS - obs.ema) * 0.3;
+    obs.n++;
+  }
+}
+
+// What the crusher can actually take. Ore delivered beyond this does not
+// become plan -- it becomes a growing stockpile -- so piling every truck onto
+// the richest face is not the win a raw tonnage figure makes it look.
+function crusherIntake() {
+  const planT = fval("shift-01", "plan_tonnes");
+  const hours = aval("shift-01", "shift_hours");
+  if (planT > 0 && hours > 0) return planT / hours;
+  return aval("crusher-01", "rated_tph_max") ?? Infinity;
+}
+
+function evaluateSplit(models, counts, intake) {
+  let oreTph = 0, gradeTonnes = 0, wasteTph = 0;
+  for (const exc of EXCAVATOR_IDS) {
+    const m = models[exc];
+    if (!m.usable) continue;
+    const n = counts[exc] || 0;
+    // Trucks and the shovel each cap the rate; the smaller cap is the rate.
+    const tph = n > 0 ? Math.min((n * m.capacity) / m.cycleS, m.capacity / m.serviceS) * 3600 : 0;
+    if (m.isWaste) wasteTph += tph;
+    else { oreTph += tph; gradeTonnes += tph * m.grade; }
+  }
+  return {
+    oreTph,
+    wasteTph,
+    useful: Math.min(oreTph, intake),
+    grade: oreTph > 0 ? gradeTonnes / oreTph : 0,
+  };
+}
+
+// Priority, in order:
+//   1. hold the grade floor (below it the blend is off-spec, nothing else
+//      matters); if no split can, maximise grade and say so;
+//   2. feed the crusher as fully as it can take;
+//   3. put whatever the crusher cannot use onto stripping rather than into a
+//      stockpile -- this is what stops the answer being "five trucks on the
+//      best face", since ore tipped beyond the crusher's appetite is not plan,
+//      it is just a growing pile;
+//   4. blend as CLOSE to the floor as possible from above.
+//
+// That last rule is deliberately not "maximise grade". A mine blends to hit
+// its target, not to beat it: grade delivered above plan is rich ore spent for
+// nothing, and burning the high-grade face first shortens the time the section
+// can keep meeting plan at all. It is also what keeps this module's advice
+// consistent with the ore-quality module next to it, which tells the
+// dispatcher to shift trucks onto the leaner face whenever grade allows.
+function betterSplit(a, b) {
+  if (!b) return true;
+  if (a.meets !== b.meets) return a.meets;
+  if (!a.meets) {
+    // Grade floor out of reach (one ore face left, say). Best grade still
+    // wins, but with a single source every split grades the same, and then
+    // tonnage has to decide -- otherwise the tie is broken by enumeration
+    // order and the module cheerfully advises pulling trucks OFF ore in the
+    // middle of a shovel outage. Caught exactly that way on the stand.
+    if (Math.abs(a.grade - b.grade) > 1e-6) return a.grade > b.grade;
+    if (Math.abs(a.useful - b.useful) > 1) return a.useful > b.useful;
+    return a.wasteTph > b.wasteTph;
+  }
+  if (Math.abs(a.useful - b.useful) > 1) return a.useful > b.useful;
+  if (Math.abs(a.wasteTph - b.wasteTph) > 1) return a.wasteTph > b.wasteTph;
+  return a.gradeMargin < b.gradeMargin;
+}
+
+function optimalSplit(models, truckCount, gradeMin, intake) {
+  const usable = EXCAVATOR_IDS.filter((exc) => models[exc].usable);
+  if (!usable.length || truckCount <= 0) return null;
+  const hasWaste = usable.some((exc) => models[exc].isWaste);
+
+  const splits = [];
+  const walk = (i, left, acc) => {
+    if (i === usable.length - 1) { splits.push({ ...acc, [usable[i]]: left }); return; }
+    for (let n = 0; n <= left; n++) walk(i + 1, left - n, { ...acc, [usable[i]]: n });
+  };
+  walk(0, truckCount, {});
+
+  let best = null, relaxed = null;
+  for (const counts of splits) {
+    const m = evaluateSplit(models, counts, intake);
+    const candidate = {
+      counts, ...m,
+      meets: m.grade >= gradeMin - 1e-9,
+      gradeMargin: m.grade - gradeMin, // how much rich ore the blend gives away
+    };
+    if (betterSplit(candidate, relaxed)) relaxed = candidate;
+    // Stripping must not stop: with no trucks on waste the pit cannot advance,
+    // however good the ore numbers look this hour.
+    const keepsStripping = !hasWaste || usable.some((exc) => models[exc].isWaste && counts[exc] > 0);
+    if (keepsStripping && betterSplit(candidate, best)) best = candidate;
+  }
+  return best || relaxed;
+}
+
+function renderAutodispatch() {
+  const body = document.getElementById("autodispatch-body");
+  observeCycles(performance.now());
+
+  const models = {};
+  for (const exc of EXCAVATOR_IDS) models[exc] = cycleModel(exc);
+  const usable = EXCAVATOR_IDS.filter((exc) => models[exc].usable);
+
+  const active = TRUCK_IDS.filter((id) => fval(id, "state") !== "down");
+  if (!usable.length || !active.length) {
+    body.innerHTML = `<div class="note warn">Распределять нечего: нет доступных экскаваторов или самосвалов.</div>`;
+    return;
+  }
+
+  // Compared against the dispatcher's own orders, not against where the trucks
+  // happen to be this second -- the orders are what the panel next door shows
+  // and what the viewer would actually change.
+  const current = {};
+  let stranded = 0;
+  for (const id of active) {
+    const ordered = aval(id, "assigned_excavator");
+    if (models[ordered]?.usable) current[ordered] = (current[ordered] || 0) + 1;
+    else stranded++;
+  }
+
+  const gradeMin = fval("shift-01", "plan_grade_min") ?? 0;
+  const intake = crusherIntake();
+  const now = evaluateSplit(models, current, intake);
+  const best = optimalSplit(models, active.length, gradeMin, intake);
+  if (!best) { body.innerHTML = `<div class="note warn">Не удалось рассчитать распределение.</div>`; return; }
+
+  const splitText = (counts) => usable.map((exc) => `${EXC_LABEL[exc]}&nbsp;${counts[exc] || 0}`).join(" · ");
+  // The headline figure is what actually reaches the crusher, not what the
+  // trucks could tip if it had infinite appetite.
+  const rate = (m) => `${num(m.useful)} т/ч · ${num(m.grade, 3)}%&nbsp;Cu`;
+  const gain = best.useful - now.useful;
+
+  const moves = usable
+    .map((exc) => ({ exc, d: (best.counts[exc] || 0) - (current[exc] || 0) }))
+    .filter((m) => m.d !== 0)
+    .map((m) => `${EXC_LABEL[m.exc]} ${m.d > 0 ? "+" : "−"}${Math.abs(m.d)}`);
+
+  const cycles = usable
+    .map((exc) => `${EXC_LABEL[exc]} ${num(models[exc].cycleS / 60, 1)}&nbsp;мин ${models[exc].calibrated ? "факт" : "расчёт"}`)
+    .join(" · ");
+
+  const notes = [];
+  for (const exc of EXCAVATOR_IDS) {
+    if (!models[exc].usable) notes.push(`${EXC_LABEL[exc]} недоступен: ${esc(models[exc].reason)}`);
+  }
+  if (stranded) notes.push(`${stranded} самосв. назначено на недоступный экскаватор`);
+  if (!best.meets) {
+    notes.push(`План по содержанию ${num(gradeMin, 2)}% недостижим ни при каком раскладе — показан максимум`);
+  }
+  if (best.oreTph > intake + 1) {
+    notes.push(`Подача ${num(best.oreTph)} т/ч выше приёма дробилки ${num(intake)} т/ч — излишек уйдёт на склад`);
+  }
+  // While the crusher is stopped nothing the trucks tip becomes plan -- it
+  // becomes stockpile. Saying "2 850 т/ч" through a crusher outage would be a
+  // straight-up false claim on screen.
+  if (fval("crusher-01", "state") === "down") {
+    const room = (aval("stockpile-01", "capacity_t") ?? 0) - (fval("stockpile-01", "tonnes_current") ?? 0);
+    notes.push(
+      `Дробилка остановлена — подача идёт на склад, план смены не растёт` +
+      (room > 0 ? ` (свободно ${num(room)} т)` : ` (склад полон, самосвалы встанут)`),
+    );
+  }
+
+  body.innerHTML = `
+    <div class="line"><span class="tag">Сейчас</span><span class="split">${splitText(current)}</span><span class="num">${rate(now)}</span></div>
+    <div class="line"><span class="tag">Оптимум</span><span class="split">${splitText(best.counts)}</span><span class="num">${rate(best)}</span>${
+      gain > 1 ? `<span class="gain">+${num(gain)} т/ч</span>` : ""
+    }</div>
+    <div class="line"><span class="tag">Цикл</span><span class="num">${cycles}</span></div>
+    <div class="note">${
+      moves.length
+        ? `Что сделать: ${moves.join(", ")} — в панели «Диспетчеризация».`
+        : "Парк распределён оптимально, менять нечего."
+    }</div>
+    ${notes.map((n) => `<div class="note warn">${n}</div>`).join("")}
   `;
 }
 
-document.getElementById("legend").innerHTML = `
-  <h2>Состояния</h2>
-  <div><span class="dot ok"></span>в работе / открыто</div>
-  <div><span class="dot warn"></span>погрузка / разгрузка</div>
-  <div><span class="dot bad"></span>отказ / закрыто / блок</div>
-`;
+// ---------------------------------------------------------------------------
+// Live scene labels. Each twin's own headline number sits above it, so the
+// scene can be read without clicking through objects one at a time.
+// ---------------------------------------------------------------------------
+
+const STATE_RU = {
+  idle: "простой", active: "в работе", loading: "погрузка", hauling: "рейс",
+  returning: "порожняком", dumping: "разгрузка", queued_at_excavator: "в очереди",
+  queued_at_crusher: "в очереди", crushing: "дробит", queued_stockpile_full: "склад полон",
+  blocked_road: "дорога закрыта", blocked_at_junction: "блок на развязке", blocked: "блок",
+  waiting_excavator_down: "ждёт экскаватор", down: "отказ", refueling: "заправка",
+  serving: "обслуживает", open: "открыта", closed: "закрыта", busy: "занята",
+  running: "работает", stopped: "стоит",
+};
+
+const num = (v, digits = 0) =>
+  typeof v === "number" ? v.toLocaleString("ru-RU", { maximumFractionDigits: digits }) : "—";
+
+// -> [subtitle, dotColorHex] for the label above `id`, or null to leave it as is.
+function labelInfo(id) {
+  const state = fval(id, "state");
+  const ru = STATE_RU[state] ?? state ?? "";
+  const dot = state === undefined ? null : colorFor(state);
+  if (id.startsWith("truck-")) return [`${ru} · ${num(fval(id, "payload_t"))} т`, dot];
+  if (id.startsWith("excavator-")) return [`${ru} · ${num(fval(id, "tonnes_loaded_shift"))} т`, dot];
+  if (id.startsWith("road-")) {
+    return [`${ru} · ${num(aval(id, "length_km"), 1)} км · ${num(fval(id, "trucks_on_road"))} маш.`, dot];
+  }
+  switch (id) {
+    case "face-ore-01":
+    case "face-ore-02":
+      return [`${num(fval(id, "grade"), 2)}% Cu · ${ru}`, dot];
+    case "face-waste-01":
+      return [`вскрыша · ${ru}`, dot];
+    case "crusher-01":
+    case "conveyor-01":
+      return [`${num(fval(id, "throughput_tph"))} т/ч · ${ru}`, dot];
+    case "stockpile-01": {
+      const t = fval(id, "tonnes_current") ?? 0;
+      const cap = aval(id, "capacity_t") || 1;
+      return [`${num(t)} т · ${num((t / cap) * 100)}% ёмкости`, colorFor(t / cap > 0.92 ? "closed" : "active")];
+    }
+    case "dump-01":
+      return [`${num(fval(id, "tonnes_shift"))} т за смену`, null];
+    case "fuel-01":
+      return [`${ru} · очередь ${num(fval(id, "trucks_queued"))}`, dot];
+    case "repair-01":
+      return [`${ru} · в ремонте ${num(fval(id, "units_in_repair"))}`, dot];
+    case "junction-01":
+      return [`самосвалов: ${num(fval(id, "trucks_at_junction"))}`, null];
+    default:
+      return null;
+  }
+}
+
+function updateLabels() {
+  for (const [id, sprite] of Object.entries(labelSprites)) {
+    const info = labelInfo(id);
+    if (info) sprite.userData.set(sprite.userData.title, info[0], info[1]);
+    // Keep labels legible across the whole zoom range: without this they are
+    // billboards in world units, so they swallow the screen up close and turn
+    // into unreadable slivers from the overview camera.
+    const dist = sprite.position.distanceTo(camera.position);
+    // Five road labels on top of the fixed plant make the overview unreadable,
+    // so they only come in when the camera is close -- or whenever the road is
+    // closed, which is exactly the moment the viewer needs to see which one.
+    if (id.startsWith("road-")) sprite.visible = dist < 100 || fval(id, "state") === "closed";
+    const k = THREE.MathUtils.clamp(dist / 62, 0.33, 2.4);
+    const w = sprite.userData.baseW * k;
+    sprite.scale.set(w, (w * LABEL_H) / LABEL_W, 1);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// KPI bar
+// ---------------------------------------------------------------------------
+
+// Status is carried by a glyph as well as a colour, so the bar still reads
+// on a greyscale screenshot and to a colour-blind viewer.
+const STAT_MARK = { warn: "!", bad: "✕" };
+
+function statHTML({ value, label, level = null, bar }) {
+  const cls = level ? ` ${level}` : "";
+  const mark = STAT_MARK[level] ? `<span class="mark">${STAT_MARK[level]}</span>` : "";
+  const barHTML =
+    bar === undefined ? "" : `<span class="bar${cls}"><i style="width:${Math.max(0, Math.min(100, bar))}%"></i></span>`;
+  return `<div class="stat"><span class="v${cls}">${mark}${value}</span><span class="l">${label}</span>${barHTML}</div>`;
+}
+
+function renderKPI() {
+  const f = (id) => fval("shift-01", id);
+  const shiftMin = (aval("shift-01", "shift_hours") || 12) * 60;
+  const remaining = f("time_remaining_min");
+  const planPct = f("plan_completion_pct");
+  const grade = f("grade_actual");
+  const gradeMin = f("plan_grade_min");
+  const tph = fval("crusher-01", "throughput_tph");
+  const trucks = fval("section-01", "trucks_active");
+
+  // Plan is judged against the clock, not against 100%: 40% of the plan at
+  // the halfway mark is on pace, the same 40% with an hour left is not. This
+  // is the whole reason a dispatcher looks at this bar.
+  const elapsedPct = remaining === undefined ? undefined : 100 * (1 - remaining / shiftMin);
+  const planLevel =
+    planPct === undefined || elapsedPct === undefined ? null
+      : planPct >= elapsedPct - 2 ? "ok" : planPct >= elapsedPct - 12 ? "warn" : "bad";
+  const gradeLevel =
+    !grade || gradeMin === undefined ? null
+      : grade >= gradeMin ? "ok" : grade >= gradeMin - 0.02 ? "warn" : "bad";
+  const tphLevel = tph === undefined ? null : tph > 0 ? "ok" : "bad";
+  const trucksLevel =
+    trucks === undefined ? null : trucks === TRUCK_IDS.length ? "ok" : trucks > 0 ? "warn" : "bad";
+
+  document.getElementById("kpi").innerHTML = [
+    statHTML({
+      value: planPct === undefined ? "—" : `${num(planPct, 1)}%`,
+      label: `план смены · ${num(f("tonnes_actual"))} из ${num(f("plan_tonnes"))} т`,
+      level: planLevel,
+      bar: planPct ?? 0,
+    }),
+    statHTML({
+      value: grade === undefined ? "—" : `${num(grade, 3)}%`,
+      label: `Cu в подаче · план ≥ ${num(gradeMin, 2)}%`,
+      level: gradeLevel,
+    }),
+    statHTML({
+      value: tph === undefined ? "—" : `${num(tph)}`,
+      label: `т/ч дробилка · паспорт ${num(aval("crusher-01", "rated_tph_min"))}–${num(aval("crusher-01", "rated_tph_max"))}`,
+      level: tphLevel,
+    }),
+    statHTML({
+      value: trucks === undefined ? "—" : `${trucks}/${TRUCK_IDS.length}`,
+      label: "самосвалов в работе",
+      level: trucksLevel,
+    }),
+    statHTML({
+      value: `№${f("shift_number") ?? "—"}`,
+      label: `смена · осталось ${num(remaining)} мин`,
+      bar: elapsedPct ?? 0,
+    }),
+  ].join("");
+}
+
+// ---------------------------------------------------------------------------
+// Chrome toggle. Six opaque panels cover a good third of the viewport, and
+// the thing worth looking at is behind them -- so they can be dismissed, by
+// the button or by pressing H (Cyrillic "р" sits on the same key).
+// ---------------------------------------------------------------------------
+
+const chromeToggle = document.getElementById("chrome-toggle");
+function setBare(bare) {
+  document.body.classList.toggle("bare", bare);
+  chromeToggle.textContent = bare ? "Показать панели (H)" : "Скрыть панели (H)";
+}
+chromeToggle.onclick = () => setBare(!document.body.classList.contains("bare"));
+addEventListener("keydown", (ev) => {
+  if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
+  const tag = ev.target?.tagName;
+  if (tag === "SELECT" || tag === "INPUT" || tag === "TEXTAREA") return;
+  if ("hHрР".includes(ev.key)) setBare(!document.body.classList.contains("bare"));
+});
 
 // ---------------------------------------------------------------------------
 // Render loop
 // ---------------------------------------------------------------------------
 
+// Status colours are picked for contrast on a dark UI. Sprayed at full
+// saturation over a whole truck body they read as toys, so painted surfaces
+// get a muted version of the same hue -- still unmistakably green/amber/red,
+// but the value of real equipment paint. Lamps and stripes keep the vivid
+// colour, which is what makes them read as lamps.
+const _paint = new THREE.Color();
+const mutedPaintCache = new Map();
+function mutedPaint(hex) {
+  let out = mutedPaintCache.get(hex);
+  if (out === undefined) {
+    const hsl = {};
+    _paint.setHex(hex, THREE.SRGBColorSpace).getHSL(hsl, THREE.SRGBColorSpace);
+    _paint.setHSL(hsl.h, hsl.s * 0.5, Math.min(0.52, hsl.l * 0.88), THREE.SRGBColorSpace);
+    out = _paint.getHex(THREE.SRGBColorSpace);
+    mutedPaintCache.set(hex, out);
+  }
+  return out;
+}
+
 function setGroupColor(group, hex) {
+  const muted = mutedPaint(hex);
   for (const mat of group?.userData.colorMats || []) {
-    mat.color.setHex(hex);
-    if (mat.userData.glow) mat.emissive.setHex(hex);
+    if (mat.userData.glow) {
+      mat.color.setHex(hex);
+      mat.emissive.setHex(hex);
+    } else {
+      mat.color.setHex(muted);
+    }
   }
 }
 
@@ -1515,6 +2754,10 @@ const _target = new THREE.Vector3();
 const _delta = new THREE.Vector3();
 
 const MIN_GAP_UNITS = 9; // bumper-to-bumper spacing for trucks following each other (truck is ~5.8 long)
+
+const dustAccum = {}; // truck id -> metres travelled since the last wheel puff
+const dumpDust = {};  // truck id -> seconds since the last tipping puff
+const digDust = {};   // excavator id -> seconds since the last digging puff
 
 // Pass 1: where each truck *wants* to be along its road (dead reckoning from
 // the simulator's route_position_km). s = fraction of the road already
@@ -1593,6 +2836,34 @@ function updateTrucks(now, dtS) {
       for (const wheel of mesh.userData.wheels) wheel.rotation.x += roll;
     }
 
+    mesh.userData.tailMat.emissiveIntensity = moving ? 0.35 : 2.8;
+
+    const label = labelSprites[id];
+    label.position.set(mesh.position.x, 6.6, mesh.position.z);
+    label.visible = camera.position.distanceTo(mesh.position) < TRUCK_LABEL_MAX_DIST;
+
+    const sinY = Math.sin(mesh.rotation.y), cosY = Math.cos(mesh.rotation.y);
+    // Wheel dust is metered by distance covered, not by time, so a plume's
+    // density follows the truck's actual speed and a parked truck raises none.
+    dustAccum[id] = (dustAccum[id] ?? 0) + Math.abs(fwd);
+    if (dustAccum[id] > 1.3) {
+      dustAccum[id] = 0;
+      const loaded = (fval(id, "payload_t") ?? 0) > 1;
+      plumes.spawn(mesh.position.x - sinY * 2.6, 0.3, mesh.position.z - cosY * 2.6, {
+        s0: 1.2, s1: loaded ? 7.5 : 5.5, lifeS: 2.3, a: loaded ? 0.46 : 0.34, rise: 0.6,
+      });
+    }
+    // Tipping throws up far more than hauling does.
+    if (m.state === "dumping") {
+      dumpDust[id] = (dumpDust[id] ?? 0) + dtS;
+      if (dumpDust[id] > 0.11) {
+        dumpDust[id] = 0;
+        plumes.spawn(mesh.position.x - sinY * 4.4, 0.5, mesh.position.z - cosY * 4.4, {
+          s0: 1.8, s1: 9, lifeS: 2.8, a: 0.4, rise: 1.4,
+        });
+      }
+    }
+
     // Body tips up while dumping; load shows whenever there's payload.
     const body = mesh.userData.bodyPivot;
     const tipTarget = m.state === "dumping" ? BODY_TIP_RAD : 0;
@@ -1619,6 +2890,14 @@ function tick() {
     setGroupColor(nodeMeshes[id], colorFor(state));
     updateBeacon(id, state === "down", now);
     animateExcavator(nodeMeshes[id], state === "loading", now, dtS);
+    if (state === "loading") {
+      digDust[id] = (digDust[id] ?? 0) + dtS;
+      if (digDust[id] > 0.3) {
+        digDust[id] = 0;
+        const P = EXC_LAYOUT[id].pile;
+        plumes.spawn(P[0], 1.2, P[2], { s0: 1.2, s1: 5.5, lifeS: 2.4, a: 0.24, rise: 0.9 });
+      }
+    }
   }
   {
     const s = fval("crusher-01", "state");
@@ -1631,8 +2910,18 @@ function tick() {
   }
   for (const id of ROAD_IDS) {
     const state = fval(id, "state");
-    setGroupColor(roadMeshes[id], colorFor(state));
+    // An open haul road has an ordinary painted centre line; only a road that
+    // is out of service lights its line up. A permanently glowing green strip
+    // looked like track markings in a racing game and, worse, spent the
+    // scene's "something is wrong" signal on the normal case.
+    const open = state === "open";
+    for (const mat of roadMeshes[id]?.userData.colorMats || []) {
+      mat.color.setHex(open ? 0x96885f : colorFor(state));
+      mat.emissive.setHex(open ? 0x000000 : colorFor(state));
+      mat.emissiveIntensity = open ? 0 : 0.9;
+    }
     updateBeacon(id, state === "closed", now);
+    updateBarrier(id, state === "closed", now);
   }
   for (const belt of belts) if (belt.isRunning()) belt.tex.offset.y -= belt.speed * dtS;
 
@@ -1642,6 +2931,9 @@ function tick() {
   nodeMeshes["dump-01"].userData.mound.scale.y = 0.55 + 0.9 * Math.min(1, Math.max(0, dumpFill));
 
   animateDust(dtS);
+  plumes.update(dtS);
+  updateSelection(now);
+  updateHover();
 
   if (now - lastUIUpdateMs >= UI_UPDATE_MS) {
     lastUIUpdateMs = now;
@@ -1649,16 +2941,23 @@ function tick() {
     renderScenarios();
     renderDispatch();
     renderRecommendation();
+    renderAutodispatch();
+    renderInspect(selectedId); // keep the open twin panel live, not a click-time snapshot
+    updateLabels();
   }
 
   controls.update();
-  renderer.render(scene, camera);
+  composer.render();
 }
 
 window.addEventListener("resize", () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
+  composer.setSize(innerWidth, innerHeight);
+  // Point sprites are sized in pixels, so the dust shader's own copy of the
+  // viewport height has to follow the window or puffs change size on resize.
+  plumes.uniforms.uScale.value = innerHeight * 0.5 * Math.min(devicePixelRatio, 2);
 });
 
 // Optional deep-link camera for demos/screenshots: ?cam=x,y,z,targetX,targetY,targetZ
@@ -1676,6 +2975,29 @@ bootstrap()
     const speedup = fval("section-01", "sim_speedup");
     if (typeof speedup === "number" && speedup > 0) SPEEDUP = speedup;
     buildRoads();
+    refreshPickables(); // roads join `pickables` only here
+    // After every object exists, including the roads and closure barriers
+    // built just above. Order matters: the shadow flags are part of the merge
+    // key, so they have to be final before anything is merged.
+    pruneShadowCasters(scene);
+    const staticGroups = [
+      pitGroup, stackerGroup,
+      ...["face-ore-01", "face-ore-02", "face-waste-01", "crusher-01", "conveyor-01",
+          "stockpile-01", "dump-01", "fuel-01", "repair-01", "junction-01"].map((id) => nodeMeshes[id]),
+      ...ROAD_IDS.map((id) => roadMeshes[id]),
+      ...ROAD_IDS.map((id) => roadBarriers[id]?.group),
+      // Vehicles too: only the wheels, the tipping body and the excavator
+      // rig actually move, everything else is welded to the hull.
+      ...TRUCK_IDS.map((id) => truckMeshes[id]),
+      ...EXCAVATOR_IDS.map((id) => nodeMeshes[id]),
+      // Each rigid sub-body is merged as its own root: its parts do not move
+      // relative to it, only it moves relative to the machine.
+      ...TRUCK_IDS.map((id) => truckMeshes[id].userData.bodyPivot),
+      ...EXCAVATOR_IDS.flatMap((id) => Object.values(nodeMeshes[id].userData.rig)),
+    ];
+    let mergedParts = 0;
+    for (const group of staticGroups) if (group) mergedParts += mergeStaticGroup(group);
+    console.info(`scene: merged ${mergedParts} static parts`);
     connectSSE();
     tick();
   })

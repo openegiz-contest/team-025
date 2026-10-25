@@ -4,55 +4,157 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Участок карьера — org.openegiz.pit</title>
+<!-- Inline so there is no second request: without it the browser asks for
+     /favicon.ico and the only thing in the console is a 404. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230e1116'/%3E%3Cpath d='M4 23h24l-5-9H9z' fill='%23c08a3e'/%3E%3Cpath d='M9 14h14l-3-5h-8z' fill='%238b96a3'/%3E%3C/svg%3E">
 <style>
   :root {
-    --bg: #0e1116; --panel: #161b22; --panel-border: #2a3139; --text: #d8dee6; --dim: #8b96a3;
+    --bg: #0e1116; --panel: #161b22; --panel-border: #2a3139; --text: #d8dee6;
+    /* Lifted from #8b96a3: the old value sat at ~4.6:1 on the panel, which is
+       borderline AA for the 11px labels that carry most of the KPI bar. */
+    --dim: #9daaba;
     --ok: #3fb950; --warn: #d29922; --bad: #e5534b; --accent: #58a6ff;
   }
   * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 13px/1.4 -apple-system, "Segoe UI", sans-serif; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 13px/1.4 -apple-system, "Segoe UI", Roboto, sans-serif; }
   #scene { position: fixed; inset: 0; }
+
   .panel {
     position: fixed; background: rgba(22,27,34,0.92); border: 1px solid var(--panel-border);
-    border-radius: 8px; padding: 10px 12px; backdrop-filter: blur(4px); max-height: calc(100vh - 20px); overflow: auto;
+    border-radius: 8px; padding: 10px 12px; backdrop-filter: blur(4px);
+    max-height: calc(100vh - 20px); overflow: auto;
   }
-  .panel h2 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--dim); font-weight: 600; }
-  #kpi { top: 10px; left: 10px; right: 10px; display: flex; gap: 18px; flex-wrap: wrap; align-items: baseline; padding: 8px 14px; }
-  #kpi .stat { display: flex; flex-direction: column; min-width: 90px; }
-  #kpi .stat .v { font-size: 18px; font-weight: 700; }
+  .panel h2 {
+    margin: 0 0 8px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--dim); font-weight: 600;
+  }
+
+  /* ---- KPI bar ------------------------------------------------------- */
+  #kpi { top: 10px; left: 10px; right: 10px; display: flex; gap: 10px; align-items: stretch; padding: 8px 10px; }
+  #kpi .stat {
+    display: flex; flex-direction: column; gap: 2px; min-width: 104px;
+    padding: 2px 12px 2px 0; border-right: 1px solid var(--panel-border);
+  }
+  #kpi .stat:last-of-type { border-right: 0; }
+  #kpi .stat .v { font-size: 19px; font-weight: 700; line-height: 1.15; font-variant-numeric: tabular-nums; }
   #kpi .stat .l { color: var(--dim); font-size: 11px; }
-  #inspect { top: 60px; right: 10px; width: 260px; }
+  /* Status is never colour alone: each evaluated stat also carries a glyph,
+     so it still reads on a monochrome screenshot or to a colour-blind user. */
+  #kpi .ok { color: var(--ok); } #kpi .warn { color: var(--warn); } #kpi .bad { color: var(--bad); }
+  #kpi .mark { font-size: 13px; opacity: .85; margin-right: 3px; }
+  #kpi .bar { height: 3px; border-radius: 2px; background: #2a3139; overflow: hidden; margin-top: 3px; }
+  #kpi .bar > i { display: block; height: 100%; background: currentColor; }
+  #kpi .spacer { flex: 1; border: 0; }
+
+  .ghost {
+    background: #1c2330; color: var(--dim); border: 1px solid var(--panel-border);
+    border-radius: 5px; font-size: 11px; padding: 5px 9px; cursor: pointer; white-space: nowrap;
+  }
+  .ghost:hover { border-color: var(--accent); color: var(--text); }
+
+  /* ---- Scenario panel ------------------------------------------------ */
+  #scenarios { bottom: 36px; left: 10px; width: 330px; }
+  #scenarios .scn {
+    border-left: 2px solid transparent; padding: 3px 0 3px 7px; margin-bottom: 3px; border-radius: 0 5px 5px 0;
+  }
+  /* An active scenario is the one thing in this panel you must not have to
+     hunt for: it gets a red rail, a tinted row and a chip, not just a line
+     of grey text underneath it. */
+  #scenarios .scn.active { border-left-color: var(--bad); background: rgba(229,83,75,0.09); }
+  #scenarios .scn .head { display: flex; align-items: baseline; gap: 6px; margin-bottom: 3px; }
+  #scenarios .scn .name { font-size: 12px; flex: 1; }
+  #scenarios .scn .chip {
+    font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: var(--bad);
+    border: 1px solid rgba(229,83,75,0.5); border-radius: 3px; padding: 0 4px; visibility: hidden;
+  }
+  #scenarios .scn.active .chip { visibility: visible; }
+  #scenarios .row { display: flex; gap: 6px; }
+  #scenarios button {
+    flex: 1; padding: 5px 8px; border-radius: 5px; border: 1px solid var(--panel-border);
+    background: #1c2330; color: var(--text); cursor: pointer; font-size: 11.5px; text-align: center;
+  }
+  #scenarios button:hover:not(:disabled) { border-color: var(--accent); }
+  /* The no-op half of each pair is disabled rather than hidden: the control
+     stays where the eye learned to find it, but cannot be clicked for nothing. */
+  #scenarios button:disabled { opacity: .35; cursor: default; }
+  #scenarios .delta { color: var(--dim); font-size: 10.5px; margin: 3px 0 0; font-variant-numeric: tabular-nums; }
+
+  /* ---- Dispatch ------------------------------------------------------ */
+  #dispatch { bottom: 36px; left: 350px; width: 262px; }
+  #dispatch .truck-row { display: flex; align-items: center; gap: 7px; margin: 4px 0; }
+  #dispatch .truck-row .id { font-size: 12px; min-width: 56px; }
+  #dispatch .truck-row .st { color: var(--dim); font-size: 10.5px; flex: 1; }
+  #dispatch select {
+    background: #1c2330; color: var(--text); border: 1px solid var(--panel-border);
+    border-radius: 4px; font-size: 11px; padding: 2px 3px;
+  }
+  /* The order is in, the truck has not reached a safe point to act on it yet. */
+  #dispatch .truck-row.pending select { border-color: var(--warn); color: var(--warn); }
+
+  /* ---- Inspect / recommend ------------------------------------------- */
+  #inspect { top: 72px; right: 10px; width: 276px; }
   #inspect table { border-collapse: collapse; width: 100%; }
   #inspect td { padding: 2px 4px; vertical-align: top; }
   #inspect td:first-child { color: var(--dim); white-space: nowrap; }
-  #scenarios { bottom: 10px; left: 10px; width: 300px; }
-  #scenarios button { display: block; width: 100%; margin: 3px 0; padding: 6px 8px; border-radius: 5px; border: 1px solid var(--panel-border);
-    background: #1c2330; color: var(--text); cursor: pointer; font-size: 12px; text-align: left; }
-  #scenarios button:hover { border-color: var(--accent); }
-  #scenarios button.undo { color: var(--dim); }
-  #scenarios .row { display: flex; gap: 6px; margin: 3px 0; }
-  #scenarios .row button { margin: 0; flex: 1; }
-  #dispatch { bottom: 10px; left: 320px; width: 230px; }
-  #dispatch .truck-row { display: flex; justify-content: space-between; align-items: center; margin: 3px 0; gap: 6px; }
-  #dispatch select { background: #1c2330; color: var(--text); border: 1px solid var(--panel-border); border-radius: 4px; font-size: 11px; }
-  #recommend { bottom: 10px; right: 10px; width: 280px; }
-  #recommend .msg { padding: 6px 0; }
-  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; }
+  #inspect td:last-child { font-variant-numeric: tabular-nums; }
+  #inspect .grp { color: var(--dim); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; padding-top: 7px; }
+  #inspect .cmd td:first-child::after { content: " ⌁"; color: var(--accent); }
+  #inspect .title { font-weight: 600; margin-bottom: 2px; }
+  #inspect .tid { color: var(--dim); font-size: 10.5px; word-break: break-all; }
+
+  /* Bottom row, left to right: scenarios, dispatch, ore quality, optimiser. */
+  #recommend { bottom: 36px; left: 622px; width: 272px; }
+  #recommend .msg { padding: 4px 0; }
+
+  #autodispatch { bottom: 36px; right: 10px; width: 310px; }
+  #autodispatch .line { display: flex; align-items: baseline; gap: 8px; margin: 3px 0; }
+  #autodispatch .tag { color: var(--dim); font-size: 11px; min-width: 56px; }
+  #autodispatch .split { font-variant-numeric: tabular-nums; font-weight: 700; letter-spacing: .02em; }
+  #autodispatch .num { color: var(--dim); font-size: 11px; font-variant-numeric: tabular-nums; }
+  #autodispatch .gain { color: var(--ok); font-size: 11px; font-weight: 600; }
+  /* No controls here on purpose: the module advises, the dispatch panel acts. */
+  #autodispatch .note { color: var(--dim); font-size: 10.5px; margin-top: 5px; line-height: 1.35; }
+  #autodispatch .note.warn { color: var(--warn); }
+
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; flex: none; }
   .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--bad); }
-  #legend { top: 60px; left: 10px; width: 170px; font-size: 11px; }
-  #legend div { margin: 2px 0; }
-  #hint { position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%); color: var(--dim); font-size: 11px; }
+
+  /* ---- Bottom strip: legend + chrome toggle -------------------------- */
+  #strip {
+    position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 14px; font-size: 11px; color: var(--dim);
+    background: rgba(22,27,34,0.86); border: 1px solid var(--panel-border);
+    border-radius: 999px; padding: 5px 12px; backdrop-filter: blur(4px); z-index: 5;
+  }
+  #strip .item { display: flex; align-items: center; }
+  #strip .sep { width: 1px; height: 13px; background: var(--panel-border); }
+
+  /* Judges are here to look at the mine, not at six dark rectangles. */
+  body.bare .panel { display: none; }
+  /* The KPI bar stays: it is a single line that never covers the scene, and
+     it is the one thing a shift dispatcher must not lose sight of. */
+  body.bare #kpi { display: flex; }
+  body.bare #strip .item { display: none; }
+  body.bare #strip .sep { display: none; }
 </style>
 </head>
 <body>
 <div id="scene"></div>
 
 <div id="kpi" class="panel"></div>
-<div id="legend" class="panel"></div>
 <div id="inspect" class="panel"><h2>Двойник</h2><div id="inspect-body">Кликните по объекту на сцене.</div></div>
 <div id="scenarios" class="panel"><h2>Сценарии «что если»</h2><div id="scenarios-body"></div></div>
 <div id="dispatch" class="panel"><h2>Диспетчеризация: самосвал → экскаватор</h2><div id="dispatch-body"></div></div>
 <div id="recommend" class="panel"><h2>Контроль качества руды</h2><div id="recommend-body"></div></div>
+<div id="autodispatch" class="panel"><h2>Автодиспетчер: распределение парка</h2><div id="autodispatch-body"></div></div>
+
+<div id="strip">
+  <span class="item"><span class="dot ok"></span>в работе / открыто</span>
+  <span class="item"><span class="dot warn"></span>погрузка / разгрузка</span>
+  <span class="item"><span class="dot bad"></span>отказ / закрыто / блок</span>
+  <span class="sep"></span>
+  <button id="chrome-toggle" class="ghost">Скрыть панели (H)</button>
+</div>
 
 <script type="importmap">
 { "imports": { "three": "./vendor/three.module.js" } }
