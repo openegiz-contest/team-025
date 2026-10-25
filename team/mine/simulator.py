@@ -164,10 +164,15 @@ class Crusher:
     window_log: list = field(default_factory=list)  # (sim_time, tonnes, grade), last CRUSHER_WINDOW_S
     hopper_t: float = 0.0     # tipped but not yet "processed" -- smooths bursts, caps throughput_tph
     hopper_grade: float = 0.0
+    # Tonnage a truck has committed to tipping here but has not finished
+    # tipping yet. Tipping takes DUMP_SECONDS, and without this two trucks
+    # both measure the same free space during that gap and both tip into it.
+    hopper_pending_t: float = 0.0
 
     def hopper_room(self):
-        """Tonnes the dump pocket can still take."""
-        return max(0.0, c.CRUSHER_HOPPER_CAPACITY_T - self.hopper_t)
+        """Tonnes the dump pocket can still take, net of loads already on
+        their way in from a truck that is mid-tip."""
+        return max(0.0, c.CRUSHER_HOPPER_CAPACITY_T - self.hopper_t - self.hopper_pending_t)
 
     def hopper_add(self, tonnes, grade):
         """Trucks (direct dump) and stockpile reclaim both land here, not in
@@ -226,6 +231,11 @@ class Stockpile:
         if new_total > 0:
             self.avg_grade = (self.avg_grade * self.tonnes_current + grade * tonnes) / new_total
         self.tonnes_current = new_total
+
+    pending_t: float = 0.0  # committed by a truck that is still tipping
+
+    def room(self):
+        return max(0.0, c.STOCKPILE_CAPACITY_T - self.tonnes_current - self.pending_t)
 
     def remove(self, tonnes):
         self.tonnes_current = max(0.0, self.tonnes_current - tonnes)
@@ -433,33 +443,32 @@ def truck_process(env, section, truck_id):
             yield from haul_leg(env, section, truck, main_id, loaded=True)
             truck.state = "queued_at_crusher"
             yield env.timeout(c.SPOT_SECONDS)
-            # Straight into the crusher's dump pocket when there is room for
-            # the whole load; otherwise onto the stockpile, which is what the
-            # pocket being full physically means. A part load is never split
-            # between the two -- a truck tips once, somewhere.
-            crusher_takes = (
-                section.crusher.state != "down"
-                and section.crusher.hopper_room() >= truck.payload_t
-            )
-            if crusher_takes:
-                truck.state = "dumping"
-                yield env.timeout(c.DUMP_SECONDS)
-                section.crusher.hopper_add(truck.payload_t, truck.grade)
-            else:
-                while section.stockpile.tonnes_current >= c.STOCKPILE_CAPACITY_T:
-                    truck.state = "queued_stockpile_full"
-                    yield env.timeout(POLL_WAIT_S)
-                    # The pocket may have drained while the truck waited.
-                    if (section.crusher.state != "down"
-                            and section.crusher.hopper_room() >= truck.payload_t):
-                        break
-                truck.state = "dumping"
-                yield env.timeout(c.DUMP_SECONDS)
+            # A truck tips once, somewhere, and only where the whole load
+            # fits: straight into the crusher's dump pocket when it has room,
+            # otherwise onto the stockpile. When neither has room the truck
+            # waits with its load on, which is what an over-trucked section
+            # physically does -- there is nowhere to put the rock. That queue
+            # is the section throttling itself down to what the crusher can
+            # actually take, and it is visible on the Stand as trucks standing
+            # at the tip rather than as a stockpile growing past its capacity.
+            while True:
                 if (section.crusher.state != "down"
                         and section.crusher.hopper_room() >= truck.payload_t):
+                    section.crusher.hopper_pending_t += truck.payload_t
+                    truck.state = "dumping"
+                    yield env.timeout(c.DUMP_SECONDS)
+                    section.crusher.hopper_pending_t -= truck.payload_t
                     section.crusher.hopper_add(truck.payload_t, truck.grade)
-                else:
+                    break
+                if section.stockpile.room() >= truck.payload_t:
+                    section.stockpile.pending_t += truck.payload_t
+                    truck.state = "dumping"
+                    yield env.timeout(c.DUMP_SECONDS)
+                    section.stockpile.pending_t -= truck.payload_t
                     section.stockpile.add(truck.payload_t, truck.grade)
+                    break
+                truck.state = "queued_stockpile_full"
+                yield env.timeout(POLL_WAIT_S)
 
         truck.trips_total += 1
         truck.payload_t = 0.0

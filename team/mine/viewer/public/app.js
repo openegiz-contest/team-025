@@ -17,7 +17,15 @@ const THING_IDS = [
   "truck-01", "truck-02", "truck-03", "truck-04", "truck-05", "truck-06",
   "road-face1", "road-face2", "road-main-a", "road-main-b", "road-waste",
   "junction-01", "stockpile-01", "crusher-01", "conveyor-01", "dump-01", "fuel-01", "repair-01",
+  "bench-n45", "bench-n60", "bench-p10",
 ];
+// Each bench twin and the piece of the pit that IS that bench, so clicking the
+// rock opens the twin. Mirrors BENCHES in constants.py.
+const BENCH_TWINS = {
+  "bench-n45": { elevM: -45, label: "Уступ −45" },
+  "bench-n60": { elevM: -60, label: "Уступ −60" },
+  "bench-p10": { elevM: 10, label: "Уступ +10" },
+};
 const TRUCK_IDS = THING_IDS.filter((id) => id.startsWith("truck-"));
 const EXCAVATOR_IDS = ["excavator-01", "excavator-02", "excavator-03"];
 const EXCAVATOR_FACE = { "excavator-01": "face-ore-01", "excavator-02": "face-ore-02", "excavator-03": "face-waste-01" };
@@ -26,12 +34,13 @@ const ROAD_IDS = ["road-face1", "road-face2", "road-main-a", "road-main-b", "roa
 // Schematic layout (meters, arbitrary scale) -- geometry is not sourced,
 // see SUBMISSION.md -> Concept, so this is deliberately stylized, not a
 // claim about Aktogay's real layout.
+// Surface nodes carry their elevation; the three in-pit nodes are placed on
+// their benches by pitNodePosition() once the pit profile is known, which is
+// why this object is filled in rather than written out whole.
 const NODE_POSITIONS = {
-  "face-ore-01": [-45, 0, -55], "face-ore-02": [45, 0, -55],
-  "junction-01": [0, 0, -15],
   "crusher-01": [0, 0, 35], "stockpile-01": [28, 0, 42], "conveyor-01": [0, 0, 60],
-  "fuel-01": [18, 0, -12], "repair-01": [62, 0, -10],
-  "face-waste-01": [-72, 0, 15], "dump-01": [-80, 0, 60],
+  "fuel-01": [34, 0, 6], "repair-01": [66, 0, -4],
+  "face-waste-01": [-96, 0, 10], "dump-01": [-104, 0, 62],
 };
 // road-main-b bows out from a straight line so it reads as a visibly
 // different, longer detour, not an overlap of road-main-a.
@@ -181,9 +190,12 @@ composer.addPass(new OutputPass());
 // ---------------------------------------------------------------------------
 
 // 9deg put the sun almost on the horizon: long shadows, but the steppe floor
-// came out near-black and the machines lost all surface detail. 17deg keeps
-// the warm low-sun mood and still lets the ground read.
-const SUN_ELEVATION_DEG = 13;
+// came out near-black and the machines lost all surface detail. Raised again
+// once the pit became 30 units deep -- below about 18deg the sun never reaches
+// past the second bench, and the two lower working faces, which are the whole
+// point of the excavation, sit in near-black self-shadow. Above ~22deg the
+// warm low-sun mood goes and the steppe flattens out.
+const SUN_ELEVATION_DEG = 19;
 const SUN_AZIMUTH_DEG = 145;
 const sunDirection = new THREE.Vector3().setFromSphericalCoords(
   1,
@@ -218,7 +230,7 @@ setupSky();
 // One knob for how hard the baked sky lights everything. At full strength the
 // blue dome washes a cold cast over ground, roads and rock -- which is why the
 // haul roads came out looking like pale concrete rather than gravel.
-scene.environmentIntensity = 0.55;
+scene.environmentIntensity = 0.62;
 
 scene.fog = new THREE.Fog(0xc69c70, 210, 900);
 
@@ -229,10 +241,10 @@ sun.target.position.set(0, 0, -20);
 sun.position.copy(sunDirection).multiplyScalar(220).add(sun.target.position);
 sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
-sun.shadow.camera.left = -150;
-sun.shadow.camera.right = 150;
-sun.shadow.camera.top = 150;
-sun.shadow.camera.bottom = -150;
+sun.shadow.camera.left = -190;
+sun.shadow.camera.right = 190;
+sun.shadow.camera.top = 190;
+sun.shadow.camera.bottom = -190;
 sun.shadow.camera.near = 10;
 sun.shadow.camera.far = 420;
 sun.shadow.bias = -0.0015;
@@ -243,7 +255,7 @@ scene.add(sun.target);
 // above already carries most of the ambient color now, this just softens it.
 // Ground term is a warm sand bounce, not near-black, or everything facing
 // away from the sun turns into a silhouette.
-scene.add(new THREE.HemisphereLight(0xa9c4dd, 0x5a4a35, 0.42));
+scene.add(new THREE.HemisphereLight(0xa9c4dd, 0x5a4a35, 0.5));
 
 // ---------------------------------------------------------------------------
 // Terrain: textured steppe floor with a real hole cut where the pit is, a
@@ -330,11 +342,75 @@ function makeGroundTexture() {
   return tex;
 }
 
-// The pit sits south of the ore faces, so the faces read as working the pit
-// rim instead of floating over a hole. (The previous bowl was built under the
-// ground plane and was never actually visible.)
+// ---------------------------------------------------------------------------
+// The pit's vertical structure. The benches here are not decoration: each one
+// is a bench twin, at the elevation that twin reports, and the ore faces work
+// from inside the pit at their own levels rather than on a plane beside it.
+// Mirrors BENCHES / NODE_ELEVATION_M in constants.py; a mismatch would put a
+// shovel through a wall, so the two have to be read together.
+// ---------------------------------------------------------------------------
 const PIT_CENTER = { x: 0, z: -88 };
-const PIT_RIM_R = 46;
+const PIT_RIM_R = 78;
+const VSCALE = 0.5;              // scene units per metre of elevation
+const BENCH_HEIGHT_M = 15;       // = constants.BENCH_HEIGHT_M
+const PIT_LEVELS = 4;            // 0 / -15 / -30 / -45 / -60 m
+const PIT_DROP = BENCH_HEIGHT_M * VSCALE;
+const PIT_WALL_IN = 5;           // how far each wall leans in over one bench
+const PIT_BENCH_W = 12;          // width of the flat bench between two walls
+
+// Elevation in metres of every node, mirroring NODE_ELEVATION_M in
+// constants.py. The crusher pad is the reference level.
+const NODE_ELEV_M = {
+  "crusher-01": 0, "stockpile-01": 0, "conveyor-01": 0, "fuel-01": 0, "repair-01": 0,
+  "junction-01": -15, "face-ore-01": -45, "face-ore-02": -60,
+  "face-waste-01": 10, "dump-01": 35,
+};
+const elevY = (id) => (NODE_ELEV_M[id] ?? 0) * VSCALE;
+
+// Radius of the pit wall at a given depth below the rim, following the same
+// bench profile buildPit() constructs. Roads and faces use it so they sit on
+// the rock instead of hanging in the air beside it.
+function pitWallRadiusAt(depth) {
+  let rr = PIT_RIM_R, d = 0;
+  for (let i = 0; i < PIT_LEVELS; i++) {
+    if (depth <= d + PIT_DROP) return rr - PIT_WALL_IN * ((depth - d) / PIT_DROP);
+    rr -= PIT_WALL_IN;
+    d += PIT_DROP;
+    if (i < PIT_LEVELS - 1) rr -= PIT_BENCH_W;
+  }
+  return rr;
+}
+
+// The haul ramp: one spiral from the pit floor up to the junction, hugging
+// the wall. Everything that drives out of the pit drives up this.
+const JUNCTION_DEPTH = -elevY("junction-01");
+const PIT_FLOOR_DEPTH = PIT_LEVELS * PIT_DROP;
+const RAMP_A0 = Math.PI / 2;   // the ramp reaches the junction bench facing the plant
+const RAMP_TURN = 3.6;         // radians of turn between there and the floor
+const RAMP_INSET = 6;          // ramp centreline, in from the wall
+const rampAngleAt = (depth) =>
+  RAMP_A0 + RAMP_TURN * ((depth - JUNCTION_DEPTH) / (PIT_FLOOR_DEPTH - JUNCTION_DEPTH));
+const pitPolar = (angle, radius, y) =>
+  [PIT_CENTER.x + Math.cos(angle) * radius, y, PIT_CENTER.z + Math.sin(angle) * radius];
+const rampPointAt = (depth) =>
+  pitPolar(rampAngleAt(depth), pitWallRadiusAt(depth) - RAMP_INSET, -depth);
+
+// Where each in-pit node stands: which bench, and how far around it from the
+// ramp entry. Keeping them polar means a face cannot drift off its bench.
+const PIT_NODE_PLACEMENT = {
+  "junction-01": { aroundRamp: 0, inset: RAMP_INSET },
+  "face-ore-01": { aroundRamp: 1.45, inset: PIT_BENCH_W / 2 },
+  "face-ore-02": { aroundRamp: 2.30, inset: PIT_BENCH_W / 2 },
+};
+function pitNodePosition(id) {
+  const place = PIT_NODE_PLACEMENT[id];
+  const depth = -elevY(id);
+  return pitPolar(rampAngleAt(depth) + place.aroundRamp,
+                  pitWallRadiusAt(depth) - place.inset, -depth);
+}
+
+for (const id of Object.keys(PIT_NODE_PLACEMENT)) NODE_POSITIONS[id] = pitNodePosition(id);
+for (const [id, p] of Object.entries(NODE_POSITIONS)) p[1] = p[1] || elevY(id);
 
 // The ground is three pieces that meet at exactly y = 0:
 //   1. the graded site -- flat, with the pit cut out of it;
@@ -453,6 +529,11 @@ scene.add(buildSiteGround());
 scene.add(buildTerrainRing());
 scene.add(buildFarGround());
 
+const benchTwinMeshes = {};
+const benchTwinY = (id) => BENCH_TWINS[id].elevM * VSCALE;
+const benchTwinAtY = (y) =>
+  Object.keys(BENCH_TWINS).find((id) => Math.abs(benchTwinY(id) - y) < 0.01) || null;
+
 function buildPit() {
   const group = new THREE.Group();
   const { x: cx, z: cz } = PIT_CENTER;
@@ -460,8 +541,8 @@ function buildPit() {
     new THREE.MeshStandardMaterial({ color: 0x6f5d47, roughness: 1, flatShading: true, side: THREE.DoubleSide }),
     new THREE.MeshStandardMaterial({ color: 0x5e4f3c, roughness: 1, flatShading: true, side: THREE.DoubleSide }),
   ];
-  const benchMat = new THREE.MeshStandardMaterial({ color: 0x51463a, roughness: 1, side: THREE.DoubleSide });
-  const LEVELS = 3, DROP = 7, WALL_IN = 5, BENCH = 6;
+  const benchMat = new THREE.MeshStandardMaterial({ color: 0x6a5c48, roughness: 1, side: THREE.DoubleSide });
+  const LEVELS = PIT_LEVELS, DROP = PIT_DROP, WALL_IN = PIT_WALL_IN, BENCH = PIT_BENCH_W;
   let r = PIT_RIM_R, y = 0;
   for (let i = 0; i < LEVELS; i++) {
     const rBottom = r - WALL_IN;
@@ -489,7 +570,11 @@ function buildPit() {
       bench.rotation.x = -Math.PI / 2;
       bench.position.set(cx, y, cz);
       bench.receiveShadow = true;
-      group.add(bench);
+      // A bench that a bench twin stands for is not merged into the pit: it
+      // becomes its own object so clicking the rock opens that twin.
+      const twinId = benchTwinAtY(y);
+      if (twinId) benchTwinMeshes[twinId] = { mesh: bench, y, rMid: r - BENCH / 2 };
+      else group.add(bench);
       r -= BENCH;
     }
   }
@@ -497,40 +582,31 @@ function buildPit() {
   floor.rotation.x = -Math.PI / 2;
   floor.position.set(cx, y, cz);
   floor.receiveShadow = true;
-  group.add(floor);
-
-  // Radius of the pit wall at a given depth, following the same bench profile
-  // the walls above were built from. The ramp uses it to hug the wall instead
-  // of cutting a chord across open air.
-  function wallRadiusAt(depth) {
-    let rr = PIT_RIM_R, d = 0;
-    for (let i = 0; i < LEVELS; i++) {
-      if (depth <= d + DROP) return rr - WALL_IN * ((depth - d) / DROP);
-      rr -= WALL_IN;
-      d += DROP;
-      if (i < LEVELS - 1) rr -= BENCH;
-    }
-    return rr;
+  {
+    const twinId = benchTwinAtY(y);
+    if (twinId) benchTwinMeshes[twinId] = { mesh: floor, y, rMid: r * 0.62 };
+    else group.add(floor);
   }
 
-  // Spiral haul ramp from the rim to the floor. Without a way in and out the
-  // pit reads as a crater; with one it reads as a worked excavation.
-  const totalDepth = LEVELS * DROP;
-  const rampMat = new THREE.MeshStandardMaterial({ color: 0x6d6150, roughness: 1 });
+  // Spiral haul ramp from the rim to the floor -- the same centreline the
+  // haul roads are routed along (rampPointAt), so the trucks drive on the
+  // ramp rather than through the wall beside it. It is extended a little
+  // above the junction bench so the surface roads meet it on the flat.
+  const rampMat = new THREE.MeshStandardMaterial({ color: 0x7b6e5a, roughness: 1 });
+  const RAMP_TOP_DEPTH = JUNCTION_DEPTH - PIT_DROP * 0.9;
   const rampAt = (t) => {
-    const depth = totalDepth * t;
-    const a = 3.35 + t * 3.95; // ~225 degrees of turn from rim to floor
-    const rr = wallRadiusAt(depth) - 4.4;
-    return new THREE.Vector3(cx + Math.cos(a) * rr, -depth, cz + Math.sin(a) * rr);
+    const depth = RAMP_TOP_DEPTH + (PIT_FLOOR_DEPTH - RAMP_TOP_DEPTH) * t;
+    const p = rampPointAt(depth);
+    return new THREE.Vector3(p[0], p[1], p[2]);
   };
-  const RAMP_SEGMENTS = 30;
+  const RAMP_SEGMENTS = 40;
   let prev = rampAt(0);
   for (let i = 1; i <= RAMP_SEGMENTS; i++) {
     const next = rampAt(i / RAMP_SEGMENTS);
     const dir = new THREE.Vector3().subVectors(next, prev);
     // Slightly longer than the gap so consecutive slabs overlap and the ramp
     // has no visible cracks on the outside of each turn.
-    const slab = new THREE.Mesh(new THREE.BoxGeometry(8.5, 0.9, dir.length() * 1.12), rampMat);
+    const slab = new THREE.Mesh(new THREE.BoxGeometry(9, 0.9, dir.length() * 1.12), rampMat);
     slab.position.copy(prev).addScaledVector(dir, 0.5);
     slab.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), dir.clone().normalize());
     // Deliberately not a shadow caster: 30 slabs is 30 extra draws in the
@@ -539,6 +615,24 @@ function buildPit() {
     slab.receiveShadow = true;
     group.add(slab);
     prev = next;
+  }
+
+  // Bench crest berms: a windrow along the open edge of every bench, which is
+  // what actually stops a truck driving off a bench in a real pit, and reads
+  // at a glance as "this level is worked" rather than "this is a terrace".
+  {
+    // Its own material rather than MAT.berm: the shared palette is declared
+    // below this function and is still in its temporal dead zone here.
+    const crestBermMat = new THREE.MeshStandardMaterial({ color: 0x7a6a52, roughness: 1, flatShading: true });
+    let rr = PIT_RIM_R, dd = 0;
+    for (let i = 0; i < LEVELS - 1; i++) {
+      rr -= WALL_IN; dd += DROP; rr -= BENCH;
+      const berm = new THREE.Mesh(new THREE.TorusGeometry(rr + 0.9, 0.85, 6, 64), crestBermMat);
+      berm.rotation.x = -Math.PI / 2;
+      berm.position.set(cx, -dd + 0.4, cz);
+      berm.castShadow = berm.receiveShadow = true;
+      group.add(berm);
+    }
   }
 
   // Loose rock on the pit floor, so the bottom is not a clean disc.
@@ -1173,12 +1267,12 @@ const pickables = []; // { mesh, id } -- mesh is a Group; raycast is recursive, 
 const nodeMeshes = {}; // id -> Group
 
 function addNode(id, label, group, labelY) {
-  const [x, , z] = NODE_POSITIONS[id];
-  group.position.set(x, 0, z);
+  const [x, y, z] = NODE_POSITIONS[id];
+  group.position.set(x, y, z);
   group.userData.id = id;
   scene.add(group);
   const sprite = makeLabel(label);
-  sprite.position.set(x, labelY, z);
+  sprite.position.set(x, y + labelY, z);
   scene.add(sprite);
   labelSprites[id] = sprite;
   pickables.push({ mesh: group, id });
@@ -1210,8 +1304,8 @@ for (const exc of EXCAVATOR_IDS) {
   const F = NODE_POSITIONS[face];
   const u = dirXZ(F, NODE_POSITIONS[FACE_EXIT[face]]); // along the road, away from the face
   const n = [u[1] * EXC_SIDE_SIGN[exc], -u[0] * EXC_SIDE_SIGN[exc]]; // perpendicular, toward the excavator
-  const pos = [F[0] + n[0] * 8.5, 0, F[2] + n[1] * 8.5];
-  const pile = [pos[0] - u[0] * 8.5, 0, pos[2] - u[1] * 8.5];
+  const pos = [F[0] + n[0] * 8.5, F[1], F[2] + n[1] * 8.5];
+  const pile = [pos[0] - u[0] * 8.5, F[1], pos[2] - u[1] * 8.5];
   const facing = headingOf([-u[0], -u[1]]); // excavator faces the pile
   const swing = wrapAngle(headingOf([-n[0], -n[1]]) - facing); // turret angle that points at the truck
   EXC_LAYOUT[exc] = { face, u, n, pos, pile, facing, swing };
@@ -1264,6 +1358,52 @@ function buildFaceMesh(exc, isOre) {
 addNode("face-ore-01", "Забой-1", buildFaceMesh("excavator-01", true), 16.5);
 addNode("face-ore-02", "Забой-2", buildFaceMesh("excavator-02", true), 16.5);
 addNode("face-waste-01", "Уступ вскрыши", buildFaceMesh("excavator-03", false), 16.5);
+
+// Register the two in-pit benches as objects of their own, plus a graded
+// plateau for the stripping bench above the rim. Without this the bench twins
+// exist in Ditto but there is nothing on the Stand to click, and a twin you
+// cannot see is a twin you cannot verify.
+const benchGroups = {};
+function addBenchTwin(id, mesh, labelAngle, labelRadius) {
+  const group = new THREE.Group();
+  group.add(mesh);
+  group.userData.id = id;
+  scene.add(group);
+  benchGroups[id] = group;
+  pickables.push({ mesh: group, id });
+  nodeMeshes[id] = group;
+  const [lx, , lz] = pitPolar(labelAngle, labelRadius, 0);
+  const sprite = makeLabel(BENCH_TWINS[id].label, 0.82);
+  sprite.position.set(lx, benchTwinY(id) + 7.5, lz);
+  scene.add(sprite);
+  labelSprites[id] = sprite;
+}
+for (const id of ["bench-n45", "bench-n60"]) {
+  const b = benchTwinMeshes[id];
+  if (b) addBenchTwin(id, b.mesh, rampAngleAt(-b.y) - 1.25, b.rMid);
+}
+{
+  // The stripping bench is a graded pad above grade, not a cut into the pit:
+  // it is the ground face-waste-01 and excavator-03 actually stand on.
+  const W = NODE_POSITIONS["face-waste-01"];
+  const pad = new THREE.Mesh(
+    new THREE.CylinderGeometry(30, 34, Math.max(0.6, W[1]), 7),
+    new THREE.MeshStandardMaterial({ color: 0x6a5c48, roughness: 1, flatShading: true }),
+  );
+  pad.position.set(W[0], W[1] / 2, W[2]);
+  pad.receiveShadow = true;
+  const group = new THREE.Group();
+  group.add(pad);
+  group.userData.id = "bench-p10";
+  scene.add(group);
+  benchGroups["bench-p10"] = group;
+  pickables.push({ mesh: group, id: "bench-p10" });
+  nodeMeshes["bench-p10"] = group;
+  const sprite = makeLabel(BENCH_TWINS["bench-p10"].label, 0.82);
+  sprite.position.set(W[0] - 22, W[1] + 7.5, W[2] + 16);
+  scene.add(sprite);
+  labelSprites["bench-p10"] = sprite;
+}
 
 // ---------------------------------------------------------------------------
 // Hydraulic face shovel: crawlers, carbody, slewing house with counterweight
@@ -1378,19 +1518,19 @@ function animateExcavator(group, loading, nowMs, dtS) {
 EXCAVATOR_IDS.forEach((id, i) => {
   const L = EXC_LAYOUT[id];
   const mesh = buildExcavatorMesh();
-  mesh.position.set(L.pos[0], 0, L.pos[2]);
+  mesh.position.set(L.pos[0], L.pos[1], L.pos[2]);
   mesh.rotation.y = L.facing;
   mesh.userData.id = id;
   mesh.userData.swing = L.swing;
   mesh.userData.phase = i * 0.37;
   scene.add(mesh);
   const label = makeLabel(`Экскаватор-${id.slice(-2)}`);
-  label.position.set(L.pos[0], 8.6, L.pos[2]);
+  label.position.set(L.pos[0], L.pos[1] + 8.6, L.pos[2]);
   scene.add(label);
   labelSprites[id] = label;
   pickables.push({ mesh, id });
   nodeMeshes[id] = mesh;
-  beacons[id] = createBeacon([L.pos[0], 8.5, L.pos[2]]);
+  beacons[id] = createBeacon([L.pos[0], L.pos[1] + 8.5, L.pos[2]]);
 });
 
 // ---------------------------------------------------------------------------
@@ -1604,17 +1744,55 @@ addNode("junction-01", "Развязка", buildJunctionMesh(), 10);
 // ---------------------------------------------------------------------------
 
 const ROAD_Y = 0.3, ROAD_W = 8.5, LANE_OFFSET = 2.3;
+const _yAxis = new THREE.Vector3(0, 1, 0), _zAxis = new THREE.Vector3(0, 0, 1);
+const _qPitch = new THREE.Quaternion();
 // Where roads actually stop: in front of the crusher's tipping pad and at the
 // dump's toe, not in the middle of the building/mound.
-const ROAD_NODE_OVERRIDE = { "crusher-01": [0, 0, 19], "dump-01": [-79, 0, 45] };
+const ROAD_NODE_OVERRIDE = {
+  "crusher-01": [0, 0, 19],
+  "dump-01": [-102, elevY("dump-01") * 0.42, 46],  // the toe, part-way up the mound
+};
 const roadNode = (id) => ROAD_NODE_OVERRIDE[id] || NODE_POSITIONS[id];
+
+// A road that starts inside the pit cannot run straight to the junction --
+// that line goes through rock. It runs along its own bench to the head of
+// the haul ramp, then climbs the ramp. This is where the pit's depth turns
+// into haul distance and grade, which is the whole reason the benches have
+// elevations in the first place.
+function pitExitWaypoints(fromId) {
+  const depth = -elevY(fromId);
+  const place = PIT_NODE_PLACEMENT[fromId];
+  const aFace = rampAngleAt(depth) + place.aroundRamp;
+  const aRamp = rampAngleAt(depth);
+  const pts = [];
+  const ARC_STEPS = 7;
+  for (let i = 0; i <= ARC_STEPS; i++) {
+    const a = aFace + (aRamp - aFace) * (i / ARC_STEPS);
+    pts.push(pitPolar(a, pitWallRadiusAt(depth) - place.inset, -depth));
+  }
+  const UP_STEPS = 12;
+  for (let i = 1; i <= UP_STEPS; i++) {
+    pts.push(rampPointAt(depth + (JUNCTION_DEPTH - depth) * (i / UP_STEPS)));
+  }
+  // Both ore roads climb the same ramp, and the ramp is already built as
+  // geometry. Paving them again here would stack three surfaces in the same
+  // place -- which is what made the ramp read as a pale slab laid over the
+  // rim. buildRoads() paves only up to this index; trucks still drive the
+  // whole polyline, because the ramp is the road.
+  pts.pavedUntil = ARC_STEPS;
+  return pts;
+}
 
 function roadWaypoints(id) {
   const from = aval(id, "from"), to = aval(id, "to");
   const a = roadNode(from), b = roadNode(to);
   if (!a || !b) return null;
+  if (PIT_NODE_PLACEMENT[from] && to === "junction-01") return pitExitWaypoints(from);
   const bend = ROAD_BEND[id];
-  return bend ? [a, bend, b] : [a, b];
+  if (!bend) return [a, b];
+  // The bend sits at the height the straight line would have had there, so a
+  // detour does not dive through the ground or float over it.
+  return [a, [bend[0], (a[1] + b[1]) / 2 + bend[1], bend[2]], b];
 }
 
 const bermShape = new THREE.Shape();
@@ -1627,7 +1805,9 @@ function roadLengthUnits(id) {
   if (roadLengthCache[id] === undefined) {
     const wp = roadWaypoints(id);
     let len = 0;
-    if (wp) for (let i = 0; i < wp.length - 1; i++) len += Math.hypot(wp[i + 1][0] - wp[i][0], wp[i + 1][2] - wp[i][2]);
+    if (wp) for (let i = 0; i < wp.length - 1; i++) {
+      len += Math.hypot(wp[i + 1][0] - wp[i][0], wp[i + 1][1] - wp[i][1], wp[i + 1][2] - wp[i][2]);
+    }
     roadLengthCache[id] = len || 1;
   }
   return roadLengthCache[id];
@@ -1643,7 +1823,7 @@ const barrierStripeTex = makeStripeTexture({ base: "#a82114", line: "#e4e0d6", e
 function buildRoadBarrier(id) {
   const pose = roadPose(id, 0.14);
   const group = new THREE.Group();
-  group.position.set(pose.pos[0], 0, pose.pos[2]);
+  group.position.set(pose.pos[0], pose.pos[1] - ROAD_Y, pose.pos[2]);
   group.rotation.y = pose.heading; // local +Z runs from the road's `from` toward its `to`
   group.visible = false;
   scene.add(group);
@@ -1690,12 +1870,21 @@ function buildRoads() {
     if (!wp) return;
     const group = new THREE.Group();
     const stripeMat = glowMat(0x3fb950, 0.3);
+    const pavedUntil = wp.pavedUntil ?? wp.length - 1;
     for (let i = 0; i < wp.length - 1; i++) {
+      if (i >= pavedUntil) break; // the shared haul ramp carries the rest
       const a = new THREE.Vector3(...wp[i]), b = new THREE.Vector3(...wp[i + 1]);
       const len = a.distanceTo(b);
       const seg = new THREE.Group();
       seg.position.copy(a).add(b).multiplyScalar(0.5);
-      seg.rotation.y = -Math.atan2(b.z - a.z, b.x - a.x);
+      seg.position.y += ROAD_Y;
+      // Yaw along the ground track, then tilt about the segment's own Z so
+      // the carriageway lies on the slope. A ramp built from flat slabs
+      // stair-steps; this is what makes the climb out of the pit read as a
+      // climb rather than a stack of terraces.
+      const run = Math.hypot(b.x - a.x, b.z - a.z) || 1e-6;
+      seg.quaternion.setFromAxisAngle(_yAxis, -Math.atan2(b.z - a.z, b.x - a.x));
+      seg.quaternion.multiply(_qPitch.setFromAxisAngle(_zAxis, Math.atan2(b.y - a.y, run)));
       group.add(seg);
       const surfaceTex = roadTexBase.clone();
       surfaceTex.needsUpdate = true;
@@ -1719,10 +1908,10 @@ function buildRoads() {
     scene.add(group);
     roadMeshes[id] = group;
     pickables.push({ mesh: group, id }); // roads are twins too -- clicking one inspects it
-    const mid = roadPose(id, 0.5).pos;
-    beacons[id] = createBeacon([mid[0], 2.2, mid[2]], 0xff8a3d);
+    const mid = roadPose(id, wp.pavedUntil ? 0.16 : 0.5).pos;
+    beacons[id] = createBeacon([mid[0], mid[1] + 2.2, mid[2]], 0xff8a3d);
     const label = makeLabel(id, 0.72);
-    label.position.set(mid[0], 4.6, mid[2]);
+    label.position.set(mid[0], mid[1] + 4.6, mid[2]);
     scene.add(label);
     labelSprites[id] = label;
     buildRoadBarrier(id);
@@ -1739,18 +1928,34 @@ function buildRoads() {
 // for an object actually travelling the reverse (`to`->`from`) direction.
 function roadPose(roadId, fracAlongFromTo) {
   const wp = roadWaypoints(roadId);
-  if (!wp) return { pos: NODE_POSITIONS["junction-01"], heading: 0 };
-  const segPose = (p0, p1, local) => ({
-    pos: [p0[0] + (p1[0] - p0[0]) * local, ROAD_Y, p0[2] + (p1[2] - p0[2]) * local],
-    heading: Math.atan2(p1[0] - p0[0], p1[2] - p0[2]),
-  });
-  if (wp.length === 2) return segPose(wp[0], wp[1], fracAlongFromTo);
-  // bent road: split the fraction across the two segments by their share of total length
-  const segA = new THREE.Vector3(...wp[0]).distanceTo(new THREE.Vector3(...wp[1]));
-  const segB = new THREE.Vector3(...wp[1]).distanceTo(new THREE.Vector3(...wp[2]));
-  const total = segA + segB;
-  const d = fracAlongFromTo * total;
-  return d <= segA ? segPose(wp[0], wp[1], d / segA) : segPose(wp[1], wp[2], (d - segA) / segB);
+  if (!wp) return { pos: NODE_POSITIONS["junction-01"], heading: 0, pitch: 0 };
+  const segPose = (p0, p1, local) => {
+    const run = Math.hypot(p1[0] - p0[0], p1[2] - p0[2]) || 1e-6;
+    return {
+      pos: [
+        p0[0] + (p1[0] - p0[0]) * local,
+        p0[1] + (p1[1] - p0[1]) * local + ROAD_Y,
+        p0[2] + (p1[2] - p0[2]) * local,
+      ],
+      heading: Math.atan2(p1[0] - p0[0], p1[2] - p0[2]),
+      pitch: Math.atan2(p1[1] - p0[1], run),
+    };
+  };
+  // Walk the polyline by arc length, so a ramp of many short segments is
+  // traversed at an even speed instead of racing through the tight turns.
+  const seg = [];
+  let total = 0;
+  for (let i = 0; i < wp.length - 1; i++) {
+    const len = new THREE.Vector3(...wp[i]).distanceTo(new THREE.Vector3(...wp[i + 1])) || 1e-6;
+    seg.push(len);
+    total += len;
+  }
+  let d = THREE.MathUtils.clamp(fracAlongFromTo, 0, 1) * total;
+  for (let i = 0; i < seg.length; i++) {
+    if (d <= seg[i] || i === seg.length - 1) return segPose(wp[i], wp[i + 1], Math.min(1, d / seg[i]));
+    d -= seg[i];
+  }
+  return segPose(wp[0], wp[1], 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1775,7 +1980,10 @@ const WASTE_DIR = dirXZ(NODE_POSITIONS["face-waste-01"], NODE_POSITIONS["dump-01
 const BAY_OFFSET = ROAD_W / 2 + 2.6;
 const CRUSHER_BAY_X = -BAY_OFFSET - 1;
 function parkedPose(key, slot) {
-  const at = (x, z, heading) => ({ pos: [x, 0.05, z], heading });
+  // `y` is the elevation of whatever the truck is standing on: a bench, the
+  // crusher pad, the dump. Defaults to grade for the surface facilities.
+  let groundY = 0;
+  const at = (x, z, heading) => ({ pos: [x, groundY + 0.05, z], heading });
   if (key === "fuel") {
     const [x, , z] = NODE_POSITIONS["fuel-01"];
     return slot < 2 ? at(x + (slot ? 2.5 : -2.5), z, 0) : at(x - 2.5 + 5 * (slot % 2), z - 8 * Math.floor(slot / 2), 0);
@@ -1785,16 +1993,18 @@ function parkedPose(key, slot) {
     return slot < 2 ? at(x - 1, z + (slot ? 3.2 : -3.2), Math.PI / 2) : at(x - 13, z - 3.5 + 7 * (slot % 2), Math.PI / 2);
   }
   if (key === "junction") {
-    const [x, , z] = NODE_POSITIONS["junction-01"];
+    const [x, y, z] = NODE_POSITIONS["junction-01"];
+    groundY = y;
     // angles (in XZ) of the free sectors between the roads leaving the junction
     const JUNCTION_SLOTS = [2.4, 3.0, 2.0, 3.4, 0.1, -0.35];
     const a = JUNCTION_SLOTS[slot % JUNCTION_SLOTS.length];
     const r = 12 + 7 * Math.floor(slot / JUNCTION_SLOTS.length);
     return at(x + Math.cos(a) * r, z + Math.sin(a) * r, -a);
   }
-  if (key === "crusher") return at(slot * 4.5, 24.5, Math.PI); // backed up to the hopper
+  if (key === "crusher") return at(slot * 4.5, 24.5, Math.PI); // backed up to the hopper, at grade
   if (key === "crusher-q") return at(CRUSHER_BAY_X, 17 - 7.5 * slot, 0); // staging bay beside the road
   const D = ROAD_NODE_OVERRIDE["dump-01"];
+  groundY = key === "dump" || key === "dump-q" ? D[1] : 0;
   if (key === "dump") return at(D[0] - WASTE_DIR[0], D[2] - WASTE_DIR[1], headingOf([-WASTE_DIR[0], -WASTE_DIR[1]]));
   if (key === "dump-q") {
     const back = 7.5 * (slot + 1);
@@ -1803,6 +2013,7 @@ function parkedPose(key, slot) {
   const [kind, exc] = key.split(":");
   const L = EXC_LAYOUT[exc];
   const F = NODE_POSITIONS[L.face];
+  groundY = F[1];
   if (kind === "load" && slot === 0) return at(F[0], F[2], headingOf(L.u)); // nose toward the exit, bed beside the shovel
   // Waiting trucks stand on the shoulder on the excavator's side, past the
   // excavator, so they never block the lane trucks drive in and out on.
@@ -2027,10 +2238,10 @@ function updateSelection(nowMs) {
   if (roadMeshes[selectedId]) {
     // A road's bounding box is the whole road; ring it at its midpoint instead.
     const p = roadPose(selectedId, 0.5).pos;
-    selectionRing.position.set(p[0], 0.42, p[2]);
+    selectionRing.position.set(p[0], p[1] + 0.12, p[2]);
     radius = 6.5;
   } else {
-    selectionRing.position.set(mesh.position.x, 0.14, mesh.position.z);
+    selectionRing.position.set(mesh.position.x, mesh.position.y + 0.14, mesh.position.z);
     radius = selectRadius(selectedId, mesh);
   }
   selectionRing.scale.setScalar(radius * (1 + 0.05 * Math.sin(nowMs / 320)));
@@ -2580,12 +2791,15 @@ function labelInfo(id) {
   if (id.startsWith("road-")) {
     return [`${ru} · ${num(aval(id, "length_km"), 1)} км · ${num(fval(id, "trucks_on_road"))} маш.`, dot];
   }
+  if (BENCH_TWINS[id]) {
+    return [`отм. ${num(aval(id, "elevation_m"))} м · ${num(fval(id, "tonnes_mined_shift"))} т за смену`, dot];
+  }
   switch (id) {
     case "face-ore-01":
     case "face-ore-02":
-      return [`${num(fval(id, "grade"), 2)}% Cu · ${ru}`, dot];
+      return [`${num(fval(id, "grade"), 2)}% Cu · запас ${num(fval(id, "reserves_t") / 1000, 1)} тыс. т`, dot];
     case "face-waste-01":
-      return [`вскрыша · ${ru}`, dot];
+      return [`вскрыша · запас ${num(fval(id, "reserves_t") / 1000, 1)} тыс. т`, dot];
     case "crusher-01":
     case "conveyor-01":
       return [`${num(fval(id, "throughput_tph"))} т/ч · ${ru}`, dot];
@@ -2601,7 +2815,7 @@ function labelInfo(id) {
     case "repair-01":
       return [`${ru} · в ремонте ${num(fval(id, "units_in_repair"))}`, dot];
     case "junction-01":
-      return [`самосвалов: ${num(fval(id, "trucks_at_junction"))}`, null];
+      return [`маршрут ${aval(id, "elevation_m") ?? ""} м · ${fval(id, "route_main") || "—"}`, dot];
     default:
       return null;
   }
@@ -2619,6 +2833,10 @@ function updateLabels() {
     // so they only come in when the camera is close -- or whenever the road is
     // closed, which is exactly the moment the viewer needs to see which one.
     if (id.startsWith("road-")) sprite.visible = dist < 100 || fval(id, "state") === "closed";
+    // A bench label is background information next to the machines working on
+    // it, so it only comes in once the camera is close enough to be reading
+    // the bench rather than the whole section.
+    if (id.startsWith("bench-")) sprite.visible = dist < 165;
     const k = THREE.MathUtils.clamp(dist / 62, 0.33, 2.4);
     const w = sprite.userData.baseW * k;
     sprite.scale.set(w, (w * LABEL_H) / LABEL_W, 1);
@@ -2823,7 +3041,11 @@ function updateTrucks(now, dtS) {
       // Keep right: shift into this direction's lane, so oncoming trucks pass
       // each other instead of driving through one another.
       const rx = -Math.cos(heading), rz = Math.sin(heading); // right of travel
-      pose = { pos: [road.pos[0] + rx * LANE_OFFSET, road.pos[1], road.pos[2] + rz * LANE_OFFSET], heading };
+      pose = {
+        pos: [road.pos[0] + rx * LANE_OFFSET, road.pos[1], road.pos[2] + rz * LANE_OFFSET],
+        heading,
+        pitch: returning ? -road.pitch : road.pitch,
+      };
     } else {
       const slot = slotsTaken[key] = (slotsTaken[key] ?? -1) + 1;
       pose = parkedPose(key, slot);
@@ -2833,6 +3055,9 @@ function updateTrucks(now, dtS) {
     mesh.position.lerp(_target.set(pose.pos[0], pose.pos[1], pose.pos[2]), posAlpha);
     _delta.subVectors(mesh.position, _delta);
     mesh.rotation.y += wrapAngle(pose.heading - mesh.rotation.y) * turnAlpha;
+    // Nose up the ramp and down it again. Without this a truck climbing a
+    // 10% grade stays dead level and the climb reads as a glitch.
+    mesh.rotation.x += ((pose.pitch ?? 0) - mesh.rotation.x) * turnAlpha;
 
     // Roll wheels by distance travelled along the truck's own forward axis.
     const fwd = _delta.x * Math.sin(mesh.rotation.y) + _delta.z * Math.cos(mesh.rotation.y);
@@ -2844,7 +3069,7 @@ function updateTrucks(now, dtS) {
     mesh.userData.tailMat.emissiveIntensity = moving ? 0.35 : 2.8;
 
     const label = labelSprites[id];
-    label.position.set(mesh.position.x, 6.6, mesh.position.z);
+    label.position.set(mesh.position.x, mesh.position.y + 6.6, mesh.position.z);
     label.visible = camera.position.distanceTo(mesh.position) < TRUCK_LABEL_MAX_DIST;
 
     const sinY = Math.sin(mesh.rotation.y), cosY = Math.cos(mesh.rotation.y);
