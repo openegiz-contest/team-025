@@ -74,8 +74,8 @@ simulator.py (SimPy) ──MQTT telemetry/<twin>──▶ Ditto ──MQTT opent
 ## Проверка
 
 1. `make team-mine`, подождать, пока три сервиса (`team-mine-setup`, `team-mine-simulator`, `team-mine-viewer`) поднимутся: `make ps`.
-2. Twins created: `make logs S=team-mine-setup` — должно быть `26 twins ready`.
-3. Телеметрия идёт: `make logs S=team-mine-simulator` — раз в ~15 публикаций строка `sim NNN min | crusher ...`.
+2. Twins created: `make tail S=team-mine-setup` — должно быть `26 twins ready`.
+3. Телеметрия идёт: `make tail S=team-mine-simulator` — раз в ~15 публикаций строка `sim NNN min | crusher ...`.
 4. В Ditto: `curl -u ditto:$DITTO_PASSWORD http://localhost:8080/api/2/things/org.openegiz.pit:crusher-01` — `throughput_tph` должен расти от 0 и выйти на ~2850 т/ч за первый час симулированного времени.
 5. В Grafana: Explore → InfluxDB → `mqtt_consumer` с тегом `thingId=org.openegiz.pit:crusher-01` — видны точки с полем `value_throughput_tph_properties_value`.
 6. Откройте **http://localhost:8091** — сцена должна загрузиться, самосвалы — двигаться по дорогам, KPI-строка вверху — обновляться. Откройте консоль браузера — не должно быть ошибок `fetch`/`EventSource` (если есть — почти наверняка дело в `/ditto/` проксировании, см. `viewer/nginx.conf.template`).

@@ -1,4 +1,4 @@
-.PHONY: up down ps logs smoke clean example-mine example-mine-stop team-mine team-mine-stop install uninstall status endpoints upgrade upload-build generate-data copy-build unity-demo check-secrets check-public-host
+.PHONY: up down ps logs tail smoke clean example-mine example-mine-stop team-mine team-mine-stop install uninstall status endpoints upgrade upload-build generate-data copy-build unity-demo check-secrets check-public-host
 
 # ---------------------------------------------------------------------------
 # Docker Compose deployment (laptops, CI, contest judges): deploy/compose/
@@ -33,9 +33,13 @@ down:
 ps:
 	@$(COMPOSE) ps -a
 
-## Follow logs (one service: make logs S=gateway)
+## Follow logs, Ctrl-C to stop (one service: make logs S=gateway)
 logs:
 	$(COMPOSE) logs -f --tail=100 $(S)
+
+## Print recent logs and exit -- the scriptable form (make tail S=gateway)
+tail:
+	$(COMPOSE) logs --tail=100 $(S)
 
 ## End-to-end check of the running compose stack
 smoke:

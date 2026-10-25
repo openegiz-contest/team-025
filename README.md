@@ -23,8 +23,8 @@ make team-mine              # платформа OpenEgiz + наш участо�
 
 ```bash
 make ps                           # все сервисы, включая team-mine-setup/-simulator/-viewer, должны быть Up/Exited(0)
-make logs S=team-mine-setup       # должно быть "26 twins ready"
-make logs S=team-mine-simulator   # раз в ~30с строка "sim NNN min | crusher ..."
+make tail S=team-mine-setup       # должно быть "26 twins ready"
+make tail S=team-mine-simulator   # раз в ~30с строка "sim NNN min | crusher ..."
 ```
 
 Подробный пошаговый чеклист (включая проверку сценариев «что если» через Ditto API) — [team/mine/README.md](team/mine/README.md#проверка).
