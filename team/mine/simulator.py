@@ -159,15 +159,26 @@ class Crusher:
     hopper_t: float = 0.0     # tipped but not yet "processed" -- smooths bursts, caps throughput_tph
     hopper_grade: float = 0.0
 
+    def hopper_room(self):
+        """Tonnes the dump pocket can still take."""
+        return max(0.0, c.CRUSHER_HOPPER_CAPACITY_T - self.hopper_t)
+
     def hopper_add(self, tonnes, grade):
         """Trucks (direct dump) and stockpile reclaim both land here, not in
         `add()` directly -- draining this at CRUSHER_TARGET_TPH (see
         crusher_drain_process) is what stops reported throughput_tph from
-        exceeding the crusher's own sourced rated capacity."""
-        new_total = self.hopper_t + tonnes
+        exceeding the crusher's own sourced rated capacity.
+
+        Bounded by the pocket's capacity: anything over it is refused and
+        returned, so no tonne can disappear in here. Callers must place what
+        comes back (a truck tips it on the stockpile instead).
+        """
+        accepted = min(tonnes, self.hopper_room())
+        new_total = self.hopper_t + accepted
         if new_total > 0:
-            self.hopper_grade = (self.hopper_grade * self.hopper_t + grade * tonnes) / new_total
+            self.hopper_grade = (self.hopper_grade * self.hopper_t + grade * accepted) / new_total
         self.hopper_t = new_total
+        return tonnes - accepted
 
     def add(self, now, tonnes, grade):
         self.window_log.append((now, tonnes, grade))
@@ -191,6 +202,10 @@ class Crusher:
             "throughput_tph": {"value": round(tph, 1), "unit": "t/h"},
             "feed_grade": {"value": round(grade, 3), "unit": "% Cu"},
             "tonnes_shift": {"value": round(self.tonnes_shift, 1), "unit": "t"},
+            # The dump pocket is real tonnage with real dynamics, so it is
+            # published rather than left as a hidden variable: a full pocket
+            # is the reason trucks start tipping on the stockpile.
+            "hopper_t": {"value": round(self.hopper_t, 1), "unit": "t"},
         }, state
 
 
@@ -348,17 +363,33 @@ def truck_process(env, section, truck_id):
             yield from haul_leg(env, section, truck, main_id, loaded=True)
             truck.state = "queued_at_crusher"
             yield env.timeout(c.SPOT_SECONDS)
-            if section.crusher.state == "down":
-                while section.stockpile.tonnes_current >= c.STOCKPILE_CAPACITY_T:
-                    truck.state = "queued_stockpile_full"
-                    yield env.timeout(POLL_WAIT_S)
-                truck.state = "dumping"
-                yield env.timeout(c.DUMP_SECONDS)
-                section.stockpile.add(truck.payload_t, truck.grade)
-            else:
+            # Straight into the crusher's dump pocket when there is room for
+            # the whole load; otherwise onto the stockpile, which is what the
+            # pocket being full physically means. A part load is never split
+            # between the two -- a truck tips once, somewhere.
+            crusher_takes = (
+                section.crusher.state != "down"
+                and section.crusher.hopper_room() >= truck.payload_t
+            )
+            if crusher_takes:
                 truck.state = "dumping"
                 yield env.timeout(c.DUMP_SECONDS)
                 section.crusher.hopper_add(truck.payload_t, truck.grade)
+            else:
+                while section.stockpile.tonnes_current >= c.STOCKPILE_CAPACITY_T:
+                    truck.state = "queued_stockpile_full"
+                    yield env.timeout(POLL_WAIT_S)
+                    # The pocket may have drained while the truck waited.
+                    if (section.crusher.state != "down"
+                            and section.crusher.hopper_room() >= truck.payload_t):
+                        break
+                truck.state = "dumping"
+                yield env.timeout(c.DUMP_SECONDS)
+                if (section.crusher.state != "down"
+                        and section.crusher.hopper_room() >= truck.payload_t):
+                    section.crusher.hopper_add(truck.payload_t, truck.grade)
+                else:
+                    section.stockpile.add(truck.payload_t, truck.grade)
 
         truck.trips_total += 1
         truck.payload_t = 0.0
@@ -450,8 +481,16 @@ def stockpile_reclaim_process(env, section):
     tick_s = 120.0
     while True:
         yield env.timeout(tick_s)
-        if section.crusher.state != "down" and section.stockpile.tonnes_current > 0:
-            amount = min(section.stockpile.tonnes_current, c.STOCKPILE_RECLAIM_TPH * (tick_s / 3600.0))
+        # Reclaim only what the pocket can actually take: the feeder cannot
+        # push ore into a full crusher, and anything it "reclaimed" beyond
+        # that would leave the stockpile without arriving anywhere.
+        room = section.crusher.hopper_room()
+        if section.crusher.state != "down" and section.stockpile.tonnes_current > 0 and room > 0:
+            amount = min(
+                section.stockpile.tonnes_current,
+                c.STOCKPILE_RECLAIM_TPH * (tick_s / 3600.0),
+                room,
+            )
             grade = section.stockpile.avg_grade
             section.stockpile.remove(amount)
             section.stockpile.last_reclaim_tph = amount / (tick_s / 3600.0)

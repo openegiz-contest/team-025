@@ -841,6 +841,7 @@
       "model": "Sandvik CG820i",
       "rated_tph_min": 2000.0,
       "rated_tph_max": 3100.0,
+      "hopper_capacity_t": 870.0,
       "forced_down": false
     },
     "features": {
@@ -862,6 +863,12 @@
         }
       },
       "tonnes_shift": {
+        "properties": {
+          "value": 0,
+          "unit": "t"
+        }
+      },
+      "hopper_t": {
         "properties": {
           "value": 0,
           "unit": "t"

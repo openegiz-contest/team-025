@@ -105,6 +105,18 @@ CRUSHER_MTTR_H = 4.0                 # ASSUMPTION
 # crusher's hopper can drain -- without this, simulated throughput could
 # exceed the crusher's own spec sheet, which would look wrong on the Stand.
 CRUSHER_TARGET_TPH = 2850.0
+# ASSUMPTION: the crusher's dump pocket holds about three truck loads -- the
+# order of magnitude of a primary gyratory's surge pocket, not a Sandvik
+# figure. It exists to smooth the gap between a truck arriving all at once
+# and the crusher drawing down steadily.
+#
+# It is load-bearing, not decoration. Without a ceiling the pocket silently
+# absorbed every tonne the fleet over-delivered: measured on the live stand,
+# 37% of everything mined vanished into it, the stockpile never filled, and
+# reported throughput sat on CRUSHER_TARGET_TPH no matter what the dispatcher
+# did -- so losing a shovel moved no KPI at all. A truck that finds the
+# pocket full now tips to the stockpile instead (see truck_process).
+CRUSHER_HOPPER_CAPACITY_T = 3 * TRUCK_CAPACITY_T
 
 # -- Stockpile / dump (ASSUMPTION: no source for section-specific sizing).
 STOCKPILE_CAPACITY_T = 5000.0

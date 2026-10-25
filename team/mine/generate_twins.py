@@ -179,6 +179,7 @@ def main():
         attributes={
             "model": c.CRUSHER_MODEL,
             "rated_tph_min": c.CRUSHER_RATED_TPH_MIN, "rated_tph_max": c.CRUSHER_RATED_TPH_MAX,
+            "hopper_capacity_t": c.CRUSHER_HOPPER_CAPACITY_T,
             "forced_down": False,  # operator command
         },
         features={
@@ -186,6 +187,7 @@ def main():
             "throughput_tph": {"value": 0, "unit": "t/h"},
             "feed_grade": {"value": 0, "unit": "% Cu"},
             "tonnes_shift": {"value": 0, "unit": "t"},
+            "hopper_t": {"value": 0, "unit": "t"},
         },
     )
 

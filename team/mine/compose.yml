@@ -1,7 +1,7 @@
 # Team's open-pit section: an overlay on deploy/compose/docker-compose.yml.
 # Dev/test overlay for twins + simulator + MQTT -> Ditto (stage 15-18.10) and
 # the 3D viewer + what-if scenario panel (stage 18-22.10).
-# Not yet wired as the Submission's single entrypoint -- see team/mine/README.md.
+# This is the Submission's single entrypoint: the root README asks for `make team-mine`.
 #
 # Bring up: make team-mine (from the repo root), or directly:
 # docker compose -f ../../deploy/compose/docker-compose.yml -f compose.yml up -d --build --wait
