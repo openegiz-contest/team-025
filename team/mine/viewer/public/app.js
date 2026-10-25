@@ -44,7 +44,10 @@ const NODE_POSITIONS = {
 };
 // road-main-b bows out from a straight line so it reads as a visibly
 // different, longer detour, not an overlap of road-main-a.
-const ROAD_BEND = { "road-main-b": [22, 0, 12] };
+// The backup main is the long way round. Its bend is pushed well out to the
+// east so the two mains do not leave the pit exit as one doubled line: on the
+// Stand a dispatcher has to be able to see which road the ore is taking.
+const ROAD_BEND = { "road-main-b": [86, 0, -6] };
 
 const STATE_COLOR = {
   idle: 0x8b96a3, active: 0x3fb950, loading: 0xd29922, hauling: 0x58a6ff, returning: 0x3fb950,
@@ -627,22 +630,38 @@ function buildPit() {
     const p = rampPointAt(depth);
     return new THREE.Vector3(p[0], p[1], p[2]);
   };
-  const RAMP_SEGMENTS = 40;
-  let prev = rampAt(0);
-  for (let i = 1; i <= RAMP_SEGMENTS; i++) {
-    const next = rampAt(i / RAMP_SEGMENTS);
-    const dir = new THREE.Vector3().subVectors(next, prev);
-    // Slightly longer than the gap so consecutive slabs overlap and the ramp
-    // has no visible cracks on the outside of each turn.
-    const slab = new THREE.Mesh(new THREE.BoxGeometry(9, 0.9, dir.length() * 1.12), rampMat);
-    slab.position.copy(prev).addScaledVector(dir, 0.5);
-    slab.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), dir.clone().normalize());
-    // Deliberately not a shadow caster: 30 slabs is 30 extra draws in the
-    // shadow pass every frame, and each one's shadow falls on the pit wall
+  // One continuous ribbon along the ramp centreline, not a row of boxes.
+  // The ramp is 9 units wide but each turn step is only about 6 long, so as
+  // boxes the slabs were wider than they were long: at every turn their outer
+  // corners fanned out past the wall and the ramp read as a staircase of grey
+  // plates. A ribbon follows the curve exactly, so it cannot overhang.
+  {
+    const RAMP_SEGMENTS = 96, HALF_W = 4.5;
+    const pos = [], idx = [];
+    const p = new THREE.Vector3(), q = new THREE.Vector3(), tangent = new THREE.Vector3();
+    for (let i = 0; i <= RAMP_SEGMENTS; i++) {
+      p.copy(rampAt(i / RAMP_SEGMENTS));
+      q.copy(rampAt(Math.min(1, (i + 0.5) / RAMP_SEGMENTS)));
+      if (i === RAMP_SEGMENTS) q.copy(p).sub(rampAt((i - 0.5) / RAMP_SEGMENTS)).add(p);
+      tangent.subVectors(q, p).setY(0).normalize();
+      // Horizontal normal: rotate the ground track a quarter turn.
+      const nx = -tangent.z, nz = tangent.x;
+      pos.push(p.x + nx * HALF_W, p.y, p.z + nz * HALF_W);
+      pos.push(p.x - nx * HALF_W, p.y, p.z - nz * HALF_W);
+      if (i > 0) {
+        const a = (i - 1) * 2;
+        idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
+      }
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+    geo.setIndex(idx);
+    geo.computeVertexNormals();
+    const ribbon = new THREE.Mesh(geo, rampMat);
+    // Deliberately not a shadow caster: its shadow would fall on the pit wall
     // directly beneath it, which at this sun angle is already in shadow.
-    slab.receiveShadow = true;
-    group.add(slab);
-    prev = next;
+    ribbon.receiveShadow = true;
+    group.add(ribbon);
   }
 
   // Bench crest berms: a windrow along the open edge of every bench, which is
