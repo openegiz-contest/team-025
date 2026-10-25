@@ -9,7 +9,8 @@
       "speed_empty_kmh": 35.0,
       "job_efficiency": 0.8333,
       "dump_s": 90.0,
-      "spot_s": 30.0
+      "spot_s": 30.0,
+      "grade_speed_penalty": 0.08
     },
     "features": {
       "tonnes_to_crusher_shift": {
@@ -60,6 +61,30 @@
           "unit": "% Cu"
         }
       },
+      "plan_stripping_ratio": {
+        "properties": {
+          "value": 0.65,
+          "unit": "t/t"
+        }
+      },
+      "lom_stripping_ratio": {
+        "properties": {
+          "value": 0.2,
+          "unit": "t/t"
+        }
+      },
+      "stripping_ratio_actual": {
+        "properties": {
+          "value": 0,
+          "unit": "t/t"
+        }
+      },
+      "waste_tonnes_actual": {
+        "properties": {
+          "value": 0,
+          "unit": "t"
+        }
+      },
       "tonnes_actual": {
         "properties": {
           "value": 0,
@@ -91,15 +116,95 @@
       }
     }
   },
+  "org.openegiz.pit:bench-n45": {
+    "policyId": "default:basic_policy",
+    "attributes": {
+      "name": "Уступ −45",
+      "_isType": false,
+      "kind": "bench",
+      "_parents": "org.openegiz.pit:section-01",
+      "elevation_m": -45.0,
+      "height_m": 15.0,
+      "material": "sulfide",
+      "face": "face-ore-01"
+    },
+    "features": {
+      "state": {
+        "properties": {
+          "value": "active"
+        }
+      },
+      "tonnes_mined_shift": {
+        "properties": {
+          "value": 0,
+          "unit": "t"
+        }
+      }
+    }
+  },
+  "org.openegiz.pit:bench-n60": {
+    "policyId": "default:basic_policy",
+    "attributes": {
+      "name": "Уступ −60",
+      "_isType": false,
+      "kind": "bench",
+      "_parents": "org.openegiz.pit:section-01",
+      "elevation_m": -60.0,
+      "height_m": 15.0,
+      "material": "sulfide",
+      "face": "face-ore-02"
+    },
+    "features": {
+      "state": {
+        "properties": {
+          "value": "active"
+        }
+      },
+      "tonnes_mined_shift": {
+        "properties": {
+          "value": 0,
+          "unit": "t"
+        }
+      }
+    }
+  },
+  "org.openegiz.pit:bench-p10": {
+    "policyId": "default:basic_policy",
+    "attributes": {
+      "name": "Уступ +10",
+      "_isType": false,
+      "kind": "bench",
+      "_parents": "org.openegiz.pit:section-01",
+      "elevation_m": 10.0,
+      "height_m": 15.0,
+      "material": "waste",
+      "face": "face-waste-01"
+    },
+    "features": {
+      "state": {
+        "properties": {
+          "value": "active"
+        }
+      },
+      "tonnes_mined_shift": {
+        "properties": {
+          "value": 0,
+          "unit": "t"
+        }
+      }
+    }
+  },
   "org.openegiz.pit:face-ore-01": {
     "policyId": "default:basic_policy",
     "attributes": {
       "name": "Face Ore 01",
       "_isType": false,
       "kind": "face",
-      "_parents": "org.openegiz.pit:section-01",
+      "_parents": "org.openegiz.pit:bench-n45",
       "ore_type": "sulfide",
-      "target_grade_pct": 0.5
+      "target_grade_pct": 0.5,
+      "elevation_m": -45.0,
+      "initial_reserves_t": 120000.0
     },
     "features": {
       "state": {
@@ -112,6 +217,18 @@
           "value": 0.5,
           "unit": "% Cu"
         }
+      },
+      "reserves_t": {
+        "properties": {
+          "value": 120000.0,
+          "unit": "t"
+        }
+      },
+      "tonnes_mined_shift": {
+        "properties": {
+          "value": 0,
+          "unit": "t"
+        }
       }
     }
   },
@@ -121,9 +238,11 @@
       "name": "Face Ore 02",
       "_isType": false,
       "kind": "face",
-      "_parents": "org.openegiz.pit:section-01",
+      "_parents": "org.openegiz.pit:bench-n60",
       "ore_type": "sulfide",
-      "target_grade_pct": 0.33
+      "target_grade_pct": 0.33,
+      "elevation_m": -60.0,
+      "initial_reserves_t": 160000.0
     },
     "features": {
       "state": {
@@ -136,22 +255,48 @@
           "value": 0.33,
           "unit": "% Cu"
         }
+      },
+      "reserves_t": {
+        "properties": {
+          "value": 160000.0,
+          "unit": "t"
+        }
+      },
+      "tonnes_mined_shift": {
+        "properties": {
+          "value": 0,
+          "unit": "t"
+        }
       }
     }
   },
   "org.openegiz.pit:face-waste-01": {
     "policyId": "default:basic_policy",
     "attributes": {
-      "name": "Вскрышной уступ",
+      "name": "Вскрышной забой",
       "_isType": false,
       "kind": "face",
-      "_parents": "org.openegiz.pit:section-01",
-      "ore_type": "waste"
+      "_parents": "org.openegiz.pit:bench-p10",
+      "ore_type": "waste",
+      "elevation_m": 10.0,
+      "initial_reserves_t": 400000.0
     },
     "features": {
       "state": {
         "properties": {
           "value": "active"
+        }
+      },
+      "reserves_t": {
+        "properties": {
+          "value": 400000.0,
+          "unit": "t"
+        }
+      },
+      "tonnes_mined_shift": {
+        "properties": {
+          "value": 0,
+          "unit": "t"
         }
       }
     }
@@ -650,7 +795,10 @@
       "to": "junction-01",
       "priority": "primary",
       "length_km": 1.2,
-      "max_grade_pct": 9.0,
+      "elev_from_m": -45.0,
+      "elev_to_m": -15.0,
+      "avg_grade_pct": 2.5,
+      "ruling_grade_pct": 6.2,
       "width_m": 32.0,
       "closed": false
     },
@@ -679,7 +827,10 @@
       "to": "junction-01",
       "priority": "primary",
       "length_km": 1.3,
-      "max_grade_pct": 9.0,
+      "elev_from_m": -60.0,
+      "elev_to_m": -15.0,
+      "avg_grade_pct": 3.46,
+      "ruling_grade_pct": 8.7,
       "width_m": 32.0,
       "closed": false
     },
@@ -708,7 +859,10 @@
       "to": "crusher-01",
       "priority": "primary",
       "length_km": 1.2,
-      "max_grade_pct": 9.0,
+      "elev_from_m": -15.0,
+      "elev_to_m": 0.0,
+      "avg_grade_pct": 1.25,
+      "ruling_grade_pct": 3.1,
       "width_m": 32.0,
       "closed": false
     },
@@ -737,7 +891,10 @@
       "to": "crusher-01",
       "priority": "backup",
       "length_km": 2.0,
-      "max_grade_pct": 9.0,
+      "elev_from_m": -15.0,
+      "elev_to_m": 0.0,
+      "avg_grade_pct": 0.75,
+      "ruling_grade_pct": 1.9,
       "width_m": 32.0,
       "closed": false
     },
@@ -766,7 +923,10 @@
       "to": "dump-01",
       "priority": "primary",
       "length_km": 2.6,
-      "max_grade_pct": 9.0,
+      "elev_from_m": 10.0,
+      "elev_to_m": 35.0,
+      "avg_grade_pct": 0.96,
+      "ruling_grade_pct": 2.4,
       "width_m": 32.0,
       "closed": false
     },
@@ -790,13 +950,36 @@
       "name": "Развязка Р-1",
       "_isType": false,
       "kind": "junction",
-      "_parents": "org.openegiz.pit:section-01"
+      "_parents": "org.openegiz.pit:section-01",
+      "elevation_m": -15.0,
+      "roads": [
+        "road-face1",
+        "road-face2",
+        "road-main-a",
+        "road-main-b"
+      ]
     },
     "features": {
+      "state": {
+        "properties": {
+          "value": "clear"
+        }
+      },
       "trucks_at_junction": {
         "properties": {
           "value": 0,
           "unit": "trucks"
+        }
+      },
+      "trucks_passed_shift": {
+        "properties": {
+          "value": 0,
+          "unit": "trucks"
+        }
+      },
+      "route_main": {
+        "properties": {
+          "value": "road-main-a"
         }
       }
     }
@@ -882,7 +1065,11 @@
       "name": "Конвейер на фабрику",
       "_isType": false,
       "kind": "conveyor",
-      "_parents": "org.openegiz.pit:crusher-01"
+      "_parents": "org.openegiz.pit:crusher-01",
+      "rated_tph": 3000.0,
+      "belt_speed_mps": 4.5,
+      "length_m": 1200.0,
+      "transit_s": 267
     },
     "features": {
       "state": {
@@ -894,6 +1081,18 @@
         "properties": {
           "value": 0,
           "unit": "t/h"
+        }
+      },
+      "load_pct": {
+        "properties": {
+          "value": 0,
+          "unit": "%"
+        }
+      },
+      "on_belt_t": {
+        "properties": {
+          "value": 0,
+          "unit": "t"
         }
       },
       "tonnes_shift": {

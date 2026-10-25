@@ -50,6 +50,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import deque
 from dataclasses import dataclass, field
 
 import paho.mqtt.client as mqtt
@@ -141,8 +142,13 @@ class Truck:
 class Road:
     id: str
     length_km: float
-    max_grade_pct: float
+    avg_grade_pct: float
     state: str = "open"
+    #: Declared direction is always the loaded direction (face -> junction ->
+    #: crusher, face -> dump), so a loaded truck always climbs and an empty
+    #: one always descends. That holds because every face is below the
+    #: crusher pad and the dump is above it.
+    climbs_loaded: bool = True
 
     def features(self, trucks_on_road):
         return {"state": {"value": self.state}, "trucks_on_road": {"value": trucks_on_road, "unit": "trucks"}}
@@ -240,7 +246,8 @@ class Section:
         self.face_grade = {"face-ore-01": c.FACE_ORE_01_GRADE_PCT, "face-ore-02": c.FACE_ORE_02_GRADE_PCT}
         self.excavators = {eid: Excavator(eid) for eid in EXCAVATOR_INFO}
         self.roads = {
-            rid: Road(rid, c.ROAD_LENGTHS_KM[rid], c.ROAD_MAX_GRADE_PCT) for rid in c.ROAD_LENGTHS_KM
+            rid: Road(rid, c.ROAD_LENGTHS_KM[rid], c.road_avg_grade_pct(rid))
+            for rid in c.ROAD_EDGES
         }
         ore_assign = c.initial_truck_assignment()
         self.trucks = {
@@ -250,9 +257,20 @@ class Section:
         self.stockpile = Stockpile()
         self.dump_tonnes_current = 0.0
         self.dump_tonnes_shift = 0.0
+        # Broken tonnage standing in front of each shovel. It only ever goes
+        # down: a face that is mined out stops, which is what stops a
+        # dispatcher from parking the whole fleet on the richest bench.
+        self.face_reserves = dict(c.FACE_RESERVES_T)
+        self.face_mined_shift = {fid: 0.0 for fid in c.FACE_RESERVES_T}
+        self.junction_passes_shift = 0
+        # (arrival_time, tonnes): what is riding the belt right now. A bucket
+        # leaves the crusher at `now` and reaches the plant one transit later.
+        self.conveyor_belt = deque()
+        self.conveyor_tonnes_shift = 0.0
         self.shift_tonnes_grade_sum = 0.0  # cumulative, whole shift (unlike crusher.window_log)
         self.shift_number = 1
         self.shift_start_t = 0.0
+        self.last_snapshot_t = 0.0
 
     def start_new_shift(self, now):
         """Roll the per-shift counters over at the end of a shift.
@@ -266,6 +284,10 @@ class Section:
         self.crusher.tonnes_shift = 0.0
         self.shift_tonnes_grade_sum = 0.0
         self.dump_tonnes_shift = 0.0
+        self.junction_passes_shift = 0
+        self.conveyor_tonnes_shift = 0.0
+        for fid in self.face_mined_shift:
+            self.face_mined_shift[fid] = 0.0
         for exc in self.excavators.values():
             exc.tonnes_loaded_shift = 0.0
         log.info("shift %s started at sim %.0f min", self.shift_number, now / 60)
@@ -276,6 +298,35 @@ class Section:
             if self.roads[rid].state != "closed":
                 return rid
         return None
+
+    def face_has_reserves(self, face_id, tonnes):
+        return self.face_reserves.get(face_id, 0.0) >= tonnes
+
+    def face_take(self, face_id, tonnes):
+        """Move broken tonnage off the face and onto a truck."""
+        self.face_reserves[face_id] = max(0.0, self.face_reserves[face_id] - tonnes)
+        self.face_mined_shift[face_id] += tonnes
+
+    def conveyor_step(self, now, dt_s, crusher_tph):
+        """Carry the crusher's discharge to the plant, one transit time later.
+
+        Returns (tonnes delivered this step, tonnes currently on the belt).
+        The belt is a travelling queue, not a pipe: what the crusher loads now
+        arrives CONVEYOR_TRANSIT_S from now, so the belt goes on running --
+        and the plant goes on being fed -- for a full transit after the
+        crusher stops, and stays empty for a transit after it restarts.
+        Loading is clipped at the belt's rating, which is what makes the belt
+        its own limit rather than a mirror of the crusher."""
+        if dt_s <= 0:
+            return 0.0, sum(t for _, t in self.conveyor_belt)
+        loaded_t = min(crusher_tph, c.CONVEYOR_RATED_TPH) * dt_s / 3600.0
+        if loaded_t > 0:
+            self.conveyor_belt.append((now + c.CONVEYOR_TRANSIT_S, loaded_t))
+        delivered = 0.0
+        while self.conveyor_belt and self.conveyor_belt[0][0] <= now:
+            delivered += self.conveyor_belt.popleft()[1]
+        self.conveyor_tonnes_shift += delivered
+        return delivered / (dt_s / 3600.0), sum(t for _, t in self.conveyor_belt)
 
     def crusher_add(self, now, tonnes, grade):
         self.crusher.add(now, tonnes, grade)
@@ -295,7 +346,15 @@ class Section:
 def haul_leg(env, section, truck, road_id, loaded):
     road = section.roads[road_id]
     base_speed = c.SPEED_LOADED_KMH_BASE if loaded else c.SPEED_EMPTY_KMH_BASE
-    grade_factor = max(0.6, 1.0 - (road.max_grade_pct / 100.0) * 1.5)  # ASSUMPTION: linear grade penalty
+    # ASSUMPTION: haul speed derates linearly with grade, and only uphill.
+    # A loaded truck climbing out of a bench is rimpull-limited, so the ramp
+    # out of the deeper bench costs real minutes; coming back down it is
+    # brake- and speed-limit-bound, which the flat SPEED_EMPTY base already
+    # represents. GRADE_SPEED_PENALTY is set so the steepest ramp here runs
+    # at roughly 70% of flat-haul speed.
+    climbing = loaded == road.climbs_loaded
+    grade_factor = (max(0.5, 1.0 - road.avg_grade_pct * c.GRADE_SPEED_PENALTY)
+                    if climbing else 1.0)
     speed = min(c.TRUCK_MAX_SPEED_KMH, base_speed * grade_factor * section.rng.uniform(0.9, 1.1))
     duration_s = (road.length_km / speed) * 3600.0 / c.JOB_EFFICIENCY
     truck.state = "hauling" if loaded else "returning"
@@ -328,6 +387,15 @@ def truck_process(env, section, truck_id):
             exc, info = section.excavators[exc_id], EXCAVATOR_INFO[exc_id]
             access_road = section.choose_open_road([info["access_road"]])
 
+        while not section.face_has_reserves(info["face"], c.TRUCK_CAPACITY_T):
+            # The bench in front of this shovel is mined out. Nothing to load
+            # until a dispatcher sends the truck to a face that still has
+            # broken stock.
+            truck.state = "face_depleted"
+            yield env.timeout(POLL_WAIT_S)
+            exc_id = truck.assigned_excavator
+            exc, info = section.excavators[exc_id], EXCAVATOR_INFO[exc_id]
+
         with exc.resource.request() as req:
             truck.state = "queued_at_excavator"
             yield req
@@ -337,6 +405,7 @@ def truck_process(env, section, truck_id):
             yield env.timeout(load_s)
             truck.payload_t = c.TRUCK_CAPACITY_T
             truck.grade = section.face_grade.get(info["face"], 0.0)
+            section.face_take(info["face"], c.TRUCK_CAPACITY_T)
             exc.tonnes_loaded_shift += c.TRUCK_CAPACITY_T
             exc.passes_total += c.EXCAVATOR_PASSES_TO_FILL
             exc.state = "idle"
@@ -360,6 +429,7 @@ def truck_process(env, section, truck_id):
                 truck.state = "blocked_at_junction"
                 yield env.timeout(POLL_WAIT_S)
                 main_id = section.choose_open_road(MAIN_ROAD_CANDIDATES)
+            section.junction_passes_shift += 1
             yield from haul_leg(env, section, truck, main_id, loaded=True)
             truck.state = "queued_at_crusher"
             yield env.timeout(c.SPOT_SECONDS)
@@ -636,20 +706,52 @@ def build_snapshot(section, now, speedup):
 
     face_road = {"face-ore-01": "road-face1", "face-ore-02": "road-face2", "face-waste-01": "road-waste"}
     for face_id, road_id in face_road.items():
-        state = "blocked" if section.roads[road_id].state == "closed" else "active"
-        feats = {"state": {"value": state}}
+        reserves = section.face_reserves.get(face_id, 0.0)
+        if reserves < c.TRUCK_CAPACITY_T:
+            state = "depleted"
+        elif section.roads[road_id].state == "closed":
+            state = "blocked"
+        else:
+            state = "active"
+        feats = {
+            "state": {"value": state},
+            "reserves_t": {"value": round(reserves, 1), "unit": "t"},
+            "tonnes_mined_shift": {"value": round(section.face_mined_shift.get(face_id, 0.0), 1), "unit": "t"},
+        }
         if face_id in section.face_grade:
             feats["grade"] = {"value": round(section.face_grade[face_id], 3), "unit": "% Cu"}
         things[face_id] = feats
 
-    things["junction-01"] = {"trucks_at_junction": {"value": trucks_at_junction, "unit": "trucks"}}
+    # A bench reports the work done on the face it carries, so the vertical
+    # structure of the pit is visible in the twins and not only in the scene.
+    for bench_id, (_, face_id, _) in c.BENCHES.items():
+        things[bench_id] = {
+            "state": things[face_id]["state"],
+            "tonnes_mined_shift": things[face_id]["tonnes_mined_shift"],
+        }
+
+    main_open = section.choose_open_road(MAIN_ROAD_CANDIDATES)
+    things["junction-01"] = {
+        "state": {"value": "blocked" if main_open is None
+                  else ("congested" if trucks_at_junction else "clear")},
+        "trucks_at_junction": {"value": trucks_at_junction, "unit": "trucks"},
+        "trucks_passed_shift": {"value": section.junction_passes_shift, "unit": "trucks"},
+        # Which main the junction is currently routing ore onto -- the
+        # visible consequence of closing one of them.
+        "route_main": {"value": main_open or ""},
+    }
 
     crusher_feats, crusher_state = section.crusher.features(now)
     things["crusher-01"] = crusher_feats
+    belt_tph, on_belt_t = section.conveyor_step(
+        now, now - section.last_snapshot_t, crusher_feats["throughput_tph"]["value"])
+    section.last_snapshot_t = now
     things["conveyor-01"] = {
-        "state": {"value": "running" if crusher_state == "crushing" else "stopped"},
-        "throughput_tph": crusher_feats["throughput_tph"],
-        "tonnes_shift": crusher_feats["tonnes_shift"],
+        "state": {"value": "running" if on_belt_t > 0 else "stopped"},
+        "throughput_tph": {"value": round(belt_tph, 1), "unit": "t/h"},
+        "load_pct": {"value": round(100.0 * belt_tph / c.CONVEYOR_RATED_TPH, 1), "unit": "%"},
+        "on_belt_t": {"value": round(on_belt_t, 1), "unit": "t"},
+        "tonnes_shift": {"value": round(section.conveyor_tonnes_shift, 1), "unit": "t"},
     }
     things["stockpile-01"] = section.stockpile.features()
     things["dump-01"] = {
@@ -682,6 +784,13 @@ def build_snapshot(section, now, speedup):
     things["shift-01"] = {
         "plan_tonnes": {"value": round(c.PLAN_TONNES_SHIFT, 1), "unit": "t"},
         "plan_grade_min": {"value": c.PLAN_GRADE_MIN_PCT, "unit": "% Cu"},
+        "plan_stripping_ratio": {"value": c.PLAN_STRIPPING_RATIO, "unit": "t/t"},
+        "lom_stripping_ratio": {"value": c.LOM_STRIPPING_RATIO, "unit": "t/t"},
+        "waste_tonnes_actual": {"value": round(section.dump_tonnes_shift, 1), "unit": "t"},
+        "stripping_ratio_actual": {
+            "value": round(section.dump_tonnes_shift / tonnes_actual, 2) if tonnes_actual else 0.0,
+            "unit": "t/t",
+        },
         "tonnes_actual": {"value": round(tonnes_actual, 1), "unit": "t"},
         "grade_actual": {"value": round(section.shift_grade_actual(), 3), "unit": "% Cu"},
         "time_remaining_min": {"value": round(max(0.0, c.SHIFT_HOURS * 60 - elapsed_min), 1), "unit": "min"},

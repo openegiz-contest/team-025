@@ -2294,6 +2294,7 @@ function cycleModel(excId) {
   const base = { excId, isWaste, usable: false };
 
   if (fval(excId, "state") === "down") return { ...base, reason: "в отказе" };
+  if (fval(face, "state") === "depleted") return { ...base, reason: "забой отработан" };
   const legs = haulLegs(excId);
   if (!legs) return { ...base, reason: "нет маршрута" };
 
@@ -2305,22 +2306,26 @@ function cycleModel(excId) {
   const vLoaded = aval("section-01", "speed_loaded_kmh") || 25;
   const vEmpty = aval("section-01", "speed_empty_kmh") || 35;
 
-  // Ruling grade costs speed, and each road twin publishes its own. Without
-  // this the model ran the fleet ~15% faster than the mine actually does.
-  const gradePenalty = (roadId) =>
-    Math.max(0.6, 1 - ((aval(roadId, "max_grade_pct") ?? 0) / 100) * 1.5);
+  // Grade costs speed, and only uphill: each road twin publishes the average
+  // grade derived from its two endpoints' elevations, and the loaded
+  // direction is always the climb out of the pit. Mirrors haul_leg() in
+  // simulator.py -- if the two drift apart the advice stops matching the mine.
+  const penalty = aval("section-01", "grade_speed_penalty") ?? 0.08;
+  const legSeconds = (r) => {
+    const km = aval(r, "length_km") ?? 0;
+    const g = aval(r, "avg_grade_pct") ?? 0;
+    const up = Math.max(0.5, 1 - g * penalty);
+    return ((km / (vLoaded * up)) + (km / vEmpty)) * 3600 / eff;
+  };
 
   let travelS = 0;
   for (const leg of legs) {
     const open = leg.filter((r) => fval(r, "state") !== "closed");
     if (!open.length) return { ...base, reason: `закрыта ${leg.join(" и ")}` };
     // A truck takes whichever open road on this leg is *quickest*, which is
-    // not always the shortest once the ruling grade differs between them.
-    travelS += Math.min(...open.map((r) => {
-      const km = aval(r, "length_km") ?? 0;
-      const g = gradePenalty(r);
-      return ((km / (vLoaded * g)) + (km / (vEmpty * g))) * 3600 / eff;
-    }));
+    // not always the shortest once the grade differs between them: the backup
+    // main is nearly twice as long but climbs half as steeply.
+    travelS += Math.min(...open.map(legSeconds));
   }
   const theoreticalS = loadS + spotS + travelS + dumpS;
   cycleTheory[excId] = theoreticalS;

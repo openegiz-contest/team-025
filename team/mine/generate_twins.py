@@ -50,6 +50,7 @@ def main():
             "job_efficiency": round(c.JOB_EFFICIENCY, 4),
             "dump_s": c.DUMP_SECONDS,
             "spot_s": c.SPOT_SECONDS,
+            "grade_speed_penalty": c.GRADE_SPEED_PENALTY,
         },
         features={
             "tonnes_to_crusher_shift": {"value": 0, "unit": "t"},
@@ -65,6 +66,10 @@ def main():
         features={
             "plan_tonnes": {"value": round(c.PLAN_TONNES_SHIFT, 1), "unit": "t"},
             "plan_grade_min": {"value": c.PLAN_GRADE_MIN_PCT, "unit": "% Cu"},
+            "plan_stripping_ratio": {"value": c.PLAN_STRIPPING_RATIO, "unit": "t/t"},
+            "lom_stripping_ratio": {"value": c.LOM_STRIPPING_RATIO, "unit": "t/t"},
+            "stripping_ratio_actual": {"value": 0, "unit": "t/t"},
+            "waste_tonnes_actual": {"value": 0, "unit": "t"},
             "tonnes_actual": {"value": 0, "unit": "t"},
             "grade_actual": {"value": 0, "unit": "% Cu"},
             "time_remaining_min": {"value": c.SHIFT_HOURS * 60, "unit": "min"},
@@ -73,20 +78,62 @@ def main():
         },
     )
 
+    # A bench is the horizontal slice the pit is mined in. It is what gives the
+    # section its vertical extent: every face sits on one, and a face's working
+    # elevation is its bench's. Benches are separate twins rather than an
+    # attribute of the face because one bench can carry several faces as the
+    # cut advances along it.
+    bench_names = {"bench-n45": "Уступ −45", "bench-n60": "Уступ −60", "bench-p10": "Уступ +10"}
+    for bench_id, (elev, face_id, material) in c.BENCHES.items():
+        twins[bench_id] = thing(
+            "bench", bench_names[bench_id], parent="section-01",
+            attributes={
+                "elevation_m": elev,
+                "height_m": c.BENCH_HEIGHT_M,
+                "material": material,
+                "face": face_id,
+            },
+            features={
+                "state": {"value": "active"},
+                "tonnes_mined_shift": {"value": 0, "unit": "t"},
+            },
+        )
+
+    face_bench = {face_id: bench_id for bench_id, (_, face_id, _) in c.BENCHES.items()}
     face_grades = {
         "face-ore-01": ("sulfide", c.FACE_ORE_01_GRADE_PCT),
         "face-ore-02": ("sulfide", c.FACE_ORE_02_GRADE_PCT),
     }
     for face_id, (ore_type, grade) in face_grades.items():
         twins[face_id] = thing(
-            "face", face_id.replace("-", " ").title(), parent="section-01",
-            attributes={"ore_type": ore_type, "target_grade_pct": grade},
-            features={"state": {"value": "active"}, "grade": {"value": grade, "unit": "% Cu"}},
+            "face", face_id.replace("-", " ").title(), parent=face_bench[face_id],
+            attributes={
+                "ore_type": ore_type,
+                "target_grade_pct": grade,
+                "elevation_m": c.NODE_ELEVATION_M[face_id],
+                "initial_reserves_t": c.FACE_RESERVES_T[face_id],
+            },
+            features={
+                "state": {"value": "active"},
+                "grade": {"value": grade, "unit": "% Cu"},
+                # Broken tonnage still standing in front of the shovel. It only
+                # falls, so parking the whole fleet on one face drains it.
+                "reserves_t": {"value": c.FACE_RESERVES_T[face_id], "unit": "t"},
+                "tonnes_mined_shift": {"value": 0, "unit": "t"},
+            },
         )
     twins["face-waste-01"] = thing(
-        "face", "Вскрышной уступ", parent="section-01",
-        attributes={"ore_type": "waste"},
-        features={"state": {"value": "active"}},
+        "face", "Вскрышной забой", parent=face_bench["face-waste-01"],
+        attributes={
+            "ore_type": "waste",
+            "elevation_m": c.NODE_ELEVATION_M["face-waste-01"],
+            "initial_reserves_t": c.FACE_RESERVES_T["face-waste-01"],
+        },
+        features={
+            "state": {"value": "active"},
+            "reserves_t": {"value": c.FACE_RESERVES_T["face-waste-01"], "unit": "t"},
+            "tonnes_mined_shift": {"value": 0, "unit": "t"},
+        },
     )
 
     excavator_face = {"excavator-01": "face-ore-01", "excavator-02": "face-ore-02", "excavator-03": "face-waste-01"}
@@ -138,20 +185,21 @@ def main():
             },
         )
 
-    road_edges = {
-        "road-face1": ("face-ore-01", "junction-01", "primary"),
-        "road-face2": ("face-ore-02", "junction-01", "primary"),
-        "road-main-a": ("junction-01", "crusher-01", "primary"),
-        "road-main-b": ("junction-01", "crusher-01", "backup"),
-        "road-waste": ("face-waste-01", "dump-01", "primary"),
-    }
-    for road_id, (frm, to, priority) in road_edges.items():
+    for road_id, (frm, to, priority) in c.ROAD_EDGES.items():
         twins[road_id] = thing(
             "road", road_id.replace("-", " ").title(), parent="section-01",
             attributes={
                 "from": frm, "to": to, "priority": priority,
                 "length_km": c.ROAD_LENGTHS_KM[road_id],
-                "max_grade_pct": c.ROAD_MAX_GRADE_PCT, "width_m": c.ROAD_WIDTH_M,
+                # The grade is derived from the two endpoints' elevations and
+                # the road's length, not declared: a ramp out of a deep bench
+                # is steep because it is deep, and the backup main is gentler
+                # than the primary precisely because it is the longer way round.
+                "elev_from_m": c.NODE_ELEVATION_M[frm],
+                "elev_to_m": c.NODE_ELEVATION_M[to],
+                "avg_grade_pct": round(c.road_avg_grade_pct(road_id), 2),
+                "ruling_grade_pct": c.road_ruling_grade_pct(road_id),
+                "width_m": c.ROAD_WIDTH_M,
                 # Operator command. The `state` feature below is the
                 # simulator's own read-only mirror of it.
                 "closed": False,
@@ -161,7 +209,17 @@ def main():
 
     twins["junction-01"] = thing(
         "junction", "Развязка Р-1", parent="section-01",
-        features={"trucks_at_junction": {"value": 0, "unit": "trucks"}},
+        attributes={
+            "elevation_m": c.NODE_ELEVATION_M["junction-01"],
+            "roads": [r for r, (f, t, _) in c.ROAD_EDGES.items()
+                      if "junction-01" in (f, t)],
+        },
+        features={
+            "state": {"value": "clear"},
+            "trucks_at_junction": {"value": 0, "unit": "trucks"},
+            "trucks_passed_shift": {"value": 0, "unit": "trucks"},
+            "route_main": {"value": "road-main-a"},
+        },
     )
 
     twins["stockpile-01"] = thing(
@@ -193,9 +251,20 @@ def main():
 
     twins["conveyor-01"] = thing(
         "conveyor", "Конвейер на фабрику", parent="crusher-01",
+        attributes={
+            "rated_tph": c.CONVEYOR_RATED_TPH,
+            "belt_speed_mps": c.CONVEYOR_BELT_SPEED_MPS,
+            "length_m": c.CONVEYOR_LENGTH_M,
+            "transit_s": round(c.CONVEYOR_TRANSIT_S),
+        },
         features={
             "state": {"value": "stopped"},
+            # Measured at the plant end, so it is what the crusher was making
+            # one belt transit ago. The belt keeps running -- and the plant
+            # keeps being fed -- for a full transit after the crusher stops.
             "throughput_tph": {"value": 0, "unit": "t/h"},
+            "load_pct": {"value": 0, "unit": "%"},
+            "on_belt_t": {"value": 0, "unit": "t"},
             "tonnes_shift": {"value": 0, "unit": "t"},
         },
     )

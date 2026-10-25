@@ -68,9 +68,48 @@ FUEL_LPKM_EMPTY = 2.6                # ASSUMPTION
 REFUEL_BELOW_PCT = 20.0
 REFUEL_SECONDS = 600.0               # ASSUMPTION
 
+# -- Benches and elevations -------------------------------------------------
+# ASSUMPTION: the section's vertical layout. Aktogay's real bench elevations
+# are not public (the Concept says so), so these are our own, chosen to be
+# internally consistent: the crusher sits on the pad at the reference level,
+# the ore benches are cut below it, and stripping works a bench above the rim.
+# The deeper ore bench is the leaner one, which is why FACE_ORE_02_GRADE_PCT
+# is the lower of the two.
+#
+# These are what make the haul roads geometrically different from each other
+# instead of five copies of one number -- see road_avg_grade_pct() below.
+BENCH_HEIGHT_M = 15.0  # ASSUMPTION: typical 15 m benches for this scale
+NODE_ELEVATION_M = {
+    "crusher-01": 0.0,       # reference level: the plant pad
+    "junction-01": -15.0,
+    "face-ore-01": -45.0,    # bench -45
+    "face-ore-02": -60.0,    # bench -60, deeper and leaner
+    "face-waste-01": 10.0,   # stripping a bench above the rim
+    "dump-01": 35.0,         # the waste dump is a growing landform
+}
+
+BENCHES = {
+    # bench id: (elevation, which face works it, ore or waste)
+    "bench-n45": (-45.0, "face-ore-01", "sulfide"),
+    "bench-n60": (-60.0, "face-ore-02", "sulfide"),
+    "bench-p10": (10.0, "face-waste-01", "waste"),
+}
+
 # -- Roads ------------------------------------------------------------------
-# SOURCED: US Bureau of Mines IC 8758 -- sustained optimum grade.
-ROAD_MAX_GRADE_PCT = 9.0
+# SOURCED: US Bureau of Mines IC 8758 -- sustained optimum grade. This is the
+# ceiling a haul road is designed to, not the grade every road actually has.
+# ASSUMPTION: fractional loss of haul speed per 1% of climbing grade. 0.08
+# puts a loaded truck on the 3.5% ramp out of bench -60 at ~72% of its flat
+# speed, which is the right order for a 220 t class truck on a rimpull curve.
+GRADE_SPEED_PENALTY = 0.08
+
+ROAD_RULING_GRADE_CAP_PCT = 9.0
+
+# ASSUMPTION: a haul road is part ramp and part near-level bench road, so its
+# ruling grade -- the one that sizes haulage -- is steeper than its average
+# rise over run. Factor 2.5 is our own, and the result is capped at the
+# sourced ceiling above.
+RULING_GRADE_FACTOR = 2.5
 # SOURCED (secondary citation only, original not accessed): ~3.5x the
 # widest truck.
 ROAD_WIDTH_M = round(3.5 * TRUCK_WIDTH_M, 1)
@@ -83,6 +122,32 @@ ROAD_LENGTHS_KM = {
     "road-main-b": 2.0,
     "road-waste": 2.6,
 }
+
+# Which nodes each road joins. The single source of truth for the road graph:
+# generate_twins.py publishes it as attributes.from/to, and the ruling grade
+# below is derived from the elevation difference across it.
+ROAD_EDGES = {
+    "road-face1": ("face-ore-01", "junction-01", "primary"),
+    "road-face2": ("face-ore-02", "junction-01", "primary"),
+    "road-main-a": ("junction-01", "crusher-01", "primary"),
+    "road-main-b": ("junction-01", "crusher-01", "backup"),
+    "road-waste": ("face-waste-01", "dump-01", "primary"),
+}
+
+
+def road_avg_grade_pct(road_id):
+    """Rise over run, in percent, from the two ends' elevations."""
+    frm, to, _ = ROAD_EDGES[road_id]
+    rise = abs(NODE_ELEVATION_M[to] - NODE_ELEVATION_M[frm])
+    return rise / (ROAD_LENGTHS_KM[road_id] * 1000.0) * 100.0
+
+
+def road_ruling_grade_pct(road_id):
+    """The grade haulage is sized on. Derived, not assumed per road: a road
+    that drops further over its length rules steeper. Capped at the sourced
+    ceiling."""
+    return round(min(ROAD_RULING_GRADE_CAP_PCT,
+                     road_avg_grade_pct(road_id) * RULING_GRADE_FACTOR), 1)
 
 # ASSUMPTION: below the truck's rated max (64.5 km/h) for grade, curves and
 # safety margin -- same spirit as the Example Mine's constants.
@@ -117,6 +182,47 @@ CRUSHER_TARGET_TPH = 2850.0
 # did -- so losing a shovel moved no KPI at all. A truck that finds the
 # pocket full now tips to the stockpile instead (see truck_process).
 CRUSHER_HOPPER_CAPACITY_T = 3 * TRUCK_CAPACITY_T
+
+# -- Conveyor to the concentrator -------------------------------------------
+# ASSUMPTION: the belt is sized above the crusher's operating setpoint but
+# below its rated maximum, so a crusher running flat out can briefly outrun
+# the belt. That makes the conveyor its own constraint rather than a mirror
+# of the crusher.
+CONVEYOR_RATED_TPH = 3000.0
+CONVEYOR_BELT_SPEED_MPS = 4.5   # ASSUMPTION: ordinary overland belt speed
+CONVEYOR_LENGTH_M = 1200.0      # ASSUMPTION: crusher pad to the plant
+# What the belt carries is not what the crusher is making right now: it is
+# what the crusher was making CONVEYOR_TRANSIT_S ago. That delay is why the
+# belt keeps running after the crusher stops -- it still has to clear itself.
+CONVEYOR_TRANSIT_S = CONVEYOR_LENGTH_M / CONVEYOR_BELT_SPEED_MPS
+
+# -- Face reserves ----------------------------------------------------------
+# ASSUMPTION: broken-and-ready tonnage standing in front of each shovel. Sized
+# at a few shifts' worth so a bench is not emptied inside one shift, but a
+# dispatcher who parks the whole fleet on one face can visibly deplete it --
+# which is what makes "do not burn the rich face first" a real constraint and
+# not just a sentence in a module's description.
+FACE_RESERVES_T = {
+    "face-ore-01": 120_000.0,
+    "face-ore-02": 160_000.0,   # the deeper, leaner bench is the larger block
+    "face-waste-01": 400_000.0,
+}
+
+# -- Stripping ratio: two different numbers, deliberately both published ----
+# SOURCED (secondary, miningdataonline on KAZ Minerals ESG reporting): Aktogay
+# plans a life-of-mine stripping ratio of about 0.2 t waste per t of ore.
+# That is a whole-mine average over decades -- it is the number the deposit
+# has, not the number any one shift runs.
+LOM_STRIPPING_RATIO = 0.2
+# ASSUMPTION: this section is stripping ahead of its ore benches (face-waste-01
+# sits on bench +10, above the two ore benches it has to uncover), so its own
+# shift plan is well above the life-of-mine average. The figure is the ratio
+# the designed fleet split actually delivers -- ORE_TRUCK_COUNT on ore against
+# WASTE_TRUCK_COUNT on waste -- rather than a target the model cannot meet.
+# Both numbers reach the Stand on shift-01 so the gap is stated, not hidden:
+# a dispatcher reading only the life-of-mine figure would think the section
+# were over-stripping by 3x, when it is doing exactly what it was sent to do.
+PLAN_STRIPPING_RATIO = 0.65
 
 # -- Stockpile / dump (ASSUMPTION: no source for section-specific sizing).
 STOCKPILE_CAPACITY_T = 5000.0
