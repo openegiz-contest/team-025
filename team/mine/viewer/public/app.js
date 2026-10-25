@@ -403,6 +403,9 @@ const pitPolar = (angle, radius, y) =>
   [PIT_CENTER.x + Math.cos(angle) * radius, y, PIT_CENTER.z + Math.sin(angle) * radius];
 const rampPointAt = (depth) =>
   pitPolar(rampAngleAt(depth), pitWallRadiusAt(depth) - RAMP_INSET, -depth);
+// The ramp runs a little above the junction bench as well, so the two mains
+// meet it on the flat instead of at a kink on the bench edge.
+const RAMP_TOP_DEPTH = JUNCTION_DEPTH - PIT_DROP * 0.9;
 
 // Where each in-pit node stands: which bench, and how far around it from the
 // ramp entry. Keeping them polar means a face cannot drift off its bench.
@@ -619,7 +622,6 @@ function buildPit() {
   // ramp rather than through the wall beside it. It is extended a little
   // above the junction bench so the surface roads meet it on the flat.
   const rampMat = new THREE.MeshStandardMaterial({ color: 0x7b6e5a, roughness: 1 });
-  const RAMP_TOP_DEPTH = JUNCTION_DEPTH - PIT_DROP * 0.9;
   const rampAt = (t) => {
     const depth = RAMP_TOP_DEPTH + (PIT_FLOOR_DEPTH - RAMP_TOP_DEPTH) * t;
     const p = rampPointAt(depth);
@@ -1802,7 +1804,7 @@ function pitExitWaypoints(fromId) {
   const aFace = rampAngleAt(depth) + place.aroundRamp;
   const aRamp = rampAngleAt(depth);
   const pts = [];
-  const ARC_STEPS = 7;
+  const ARC_STEPS = 14;
   for (let i = 0; i <= ARC_STEPS; i++) {
     const a = aFace + (aRamp - aFace) * (i / ARC_STEPS);
     pts.push(pitPolar(a, pitWallRadiusAt(depth) - place.inset, -depth));
@@ -1814,9 +1816,10 @@ function pitExitWaypoints(fromId) {
   // Both ore roads climb the same ramp, and the ramp is already built as
   // geometry. Paving them again here would stack three surfaces in the same
   // place -- which is what made the ramp read as a pale slab laid over the
-  // rim. buildRoads() paves only up to this index; trucks still drive the
+  // rim. buildRoads() paves only this index range; trucks still drive the
   // whole polyline, because the ramp is the road.
-  pts.pavedUntil = ARC_STEPS;
+  pts.pave = [0, ARC_STEPS];
+  pts.pitSurface = true;
   return pts;
 }
 
@@ -1825,6 +1828,24 @@ function roadWaypoints(id) {
   const a = roadNode(from), b = roadNode(to);
   if (!a || !b) return null;
   if (PIT_NODE_PLACEMENT[from] && to === "junction-01") return pitExitWaypoints(from);
+  if (from === "junction-01") {
+    // The junction stands on the -15 bench, the plant stands at grade. A
+    // straight line between them runs through the rim, which is exactly what
+    // it looked like: the two mains disappeared into the rock. They leave the
+    // pit the only way anything leaves it -- up the haul ramp -- and only
+    // then run across the surface to the crusher.
+    const OUT = 8;
+    const pts = [a];
+    for (let i = 1; i <= OUT; i++) {
+      pts.push(rampPointAt(JUNCTION_DEPTH + (RAMP_TOP_DEPTH - JUNCTION_DEPTH) * (i / OUT)));
+    }
+    const bend = ROAD_BEND[id];
+    if (bend) pts.push([bend[0], 0, bend[2]]);
+    pts.push(b);
+    // Pave only the surface run; the ramp is already there.
+    pts.pave = [OUT, pts.length - 1];
+    return pts;
+  }
   if (from === "face-waste-01") {
     // Off the top of the stripping bench, down its flank, then across to the
     // dump. Without the two edge points the road spanned the drop in one
@@ -1920,9 +1941,9 @@ function buildRoads() {
     if (!wp) return;
     const group = new THREE.Group();
     const stripeMat = glowMat(0x3fb950, 0.3);
-    const pavedUntil = wp.pavedUntil ?? wp.length - 1;
+    const [paveFrom, paveTo] = wp.pave ?? [0, wp.length - 1];
     for (let i = 0; i < wp.length - 1; i++) {
-      if (i >= pavedUntil) break; // the shared haul ramp carries the rest
+      if (i < paveFrom || i >= paveTo) continue; // the shared haul ramp carries the rest
       const a = new THREE.Vector3(...wp[i]), b = new THREE.Vector3(...wp[i + 1]);
       const len = a.distanceTo(b);
       const seg = new THREE.Group();
@@ -1941,9 +1962,14 @@ function buildRoads() {
       surfaceTex.repeat.set((len + ROAD_W * 0.5) / 11, 1);
       const surfaceMat = new THREE.MeshStandardMaterial({
         map: surfaceTex, roughness: 1,
-        color: wp.pavedUntil ? 0xc9bda6 : 0xffffff,
+        color: wp.pitSurface ? 0x9f937d : 0xffffff,
       });
-      part(boxG(len + ROAD_W * 0.5, 0.3, ROAD_W), surfaceMat, 0, 0.15, 0, seg, false);
+      // Straight roads get a little extra length so consecutive boxes close
+      // the gap at a corner. On the short, tightly-angled segments of a bench
+      // arc that same overhang made each box stand proud of the next, and the
+      // road read as a row of plates instead of a road.
+      const over = wp.pitSurface ? 0.6 : ROAD_W * 0.5;
+      part(boxG(len + over, 0.3, ROAD_W), surfaceMat, 0, 0.15, 0, seg, false);
       // Each road's stripe at its own height: where two roads overlap (junction,
       // crusher end) their stripes would otherwise share a plane and z-fight.
       part(boxG(len, 0.04, 0.95), stripeMat, 0, 0.33 + roadIndex * 0.015, 0, seg, false);
@@ -1962,7 +1988,7 @@ function buildRoads() {
     scene.add(group);
     roadMeshes[id] = group;
     pickables.push({ mesh: group, id }); // roads are twins too -- clicking one inspects it
-    const mid = roadPose(id, wp.pavedUntil ? 0.16 : 0.5).pos;
+    const mid = roadPose(id, wp.pitSurface ? 0.1 : 0.5).pos;
     beacons[id] = createBeacon([mid[0], mid[1] + 2.2, mid[2]], 0xff8a3d);
     const label = makeLabel(id, 0.72);
     label.position.set(mid[0], mid[1] + 4.6, mid[2]);
