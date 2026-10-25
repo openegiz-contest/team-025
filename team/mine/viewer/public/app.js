@@ -1802,6 +1802,9 @@ addNode("junction-01", "Развязка", buildJunctionMesh(), 10);
 // ---------------------------------------------------------------------------
 
 const ROAD_Y = 0.3, ROAD_W = 8.5, LANE_OFFSET = 2.3;
+// On the shared haul ramp there is no carriageway box -- the ramp ribbon is
+// the running surface -- so a truck there rides at the ribbon itself.
+const RAMP_RIDE_Y = 0.05;
 const _yAxis = new THREE.Vector3(0, 1, 0), _zAxis = new THREE.Vector3(0, 0, 1);
 const _qPitch = new THREE.Quaternion();
 // Where roads actually stop: in front of the crusher's tipping pad and at the
@@ -1966,8 +1969,11 @@ function buildRoads() {
       const a = new THREE.Vector3(...wp[i]), b = new THREE.Vector3(...wp[i + 1]);
       const len = a.distanceTo(b);
       const seg = new THREE.Group();
+      // No ROAD_Y here: the carriageway box already sits from 0 to ROAD_Y
+      // above the waypoint, so its top lands exactly at the height
+      // roadPose() puts the trucks at. Adding it again lifted the road by
+      // its own thickness and the trucks drove buried in it.
       seg.position.copy(a).add(b).multiplyScalar(0.5);
-      seg.position.y += ROAD_Y;
       // Yaw along the ground track, then tilt about the segment's own Z so
       // the carriageway lies on the slope. A ramp built from flat slabs
       // stair-steps; this is what makes the climb out of the pit read as a
@@ -2028,12 +2034,14 @@ function buildRoads() {
 function roadPose(roadId, fracAlongFromTo) {
   const wp = roadWaypoints(roadId);
   if (!wp) return { pos: NODE_POSITIONS["junction-01"], heading: 0, pitch: 0 };
-  const segPose = (p0, p1, local) => {
+  const [paveFrom, paveTo] = wp.pave ?? [0, wp.length - 1];
+  const segPose = (p0, p1, local, i) => {
     const run = Math.hypot(p1[0] - p0[0], p1[2] - p0[2]) || 1e-6;
+    const lift = i >= paveFrom && i < paveTo ? ROAD_Y : RAMP_RIDE_Y;
     return {
       pos: [
         p0[0] + (p1[0] - p0[0]) * local,
-        p0[1] + (p1[1] - p0[1]) * local + ROAD_Y,
+        p0[1] + (p1[1] - p0[1]) * local + lift,
         p0[2] + (p1[2] - p0[2]) * local,
       ],
       heading: Math.atan2(p1[0] - p0[0], p1[2] - p0[2]),
@@ -2051,10 +2059,10 @@ function roadPose(roadId, fracAlongFromTo) {
   }
   let d = THREE.MathUtils.clamp(fracAlongFromTo, 0, 1) * total;
   for (let i = 0; i < seg.length; i++) {
-    if (d <= seg[i] || i === seg.length - 1) return segPose(wp[i], wp[i + 1], Math.min(1, d / seg[i]));
+    if (d <= seg[i] || i === seg.length - 1) return segPose(wp[i], wp[i + 1], Math.min(1, d / seg[i]), i);
     d -= seg[i];
   }
-  return segPose(wp[0], wp[1], 0);
+  return segPose(wp[0], wp[1], 0, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -2081,8 +2089,8 @@ const CRUSHER_BAY_X = -BAY_OFFSET - 1;
 function parkedPose(key, slot) {
   // `y` is the elevation of whatever the truck is standing on: a bench, the
   // crusher pad, the dump. Defaults to grade for the surface facilities.
-  let groundY = 0;
-  const at = (x, z, heading) => ({ pos: [x, groundY + 0.05, z], heading });
+  let groundY = 0, standOn = 0.05;
+  const at = (x, z, heading) => ({ pos: [x, groundY + standOn, z], heading });
   if (key === "fuel") {
     const [x, , z] = NODE_POSITIONS["fuel-01"];
     return slot < 2 ? at(x + (slot ? 2.5 : -2.5), z, 0) : at(x - 2.5 + 5 * (slot % 2), z - 8 * Math.floor(slot / 2), 0);
@@ -2113,6 +2121,7 @@ function parkedPose(key, slot) {
   const L = EXC_LAYOUT[exc];
   const F = NODE_POSITIONS[L.face];
   groundY = F[1];
+  standOn = ROAD_Y;  // the loading spot and the shoulder bays are on the road
   if (kind === "load" && slot === 0) return at(F[0], F[2], headingOf(L.u)); // nose toward the exit, bed beside the shovel
   // Waiting trucks stand on the shoulder on the excavator's side, past the
   // excavator, so they never block the lane trucks drive in and out on.
