@@ -429,6 +429,12 @@ function pitNodePosition(id) {
 // the road lands on the slope rather than through it.
 const WASTE_PAD = { rTop: 30, rBase: 44 };
 
+// Road geometry. Declared up here with the pit constants because the haul
+// ramp is built long before the roads are, and the ramp ribbon has to be the
+// same running surface the roads are: a step between them is a truck
+// dropping through the carriageway at the pit exit.
+const ROAD_Y = 0.3, ROAD_W = 8.5, LANE_OFFSET = 2.3;
+
 for (const id of Object.keys(PIT_NODE_PLACEMENT)) NODE_POSITIONS[id] = pitNodePosition(id);
 for (const [id, p] of Object.entries(NODE_POSITIONS)) p[1] = p[1] || elevY(id);
 
@@ -646,8 +652,8 @@ function buildPit() {
       tangent.subVectors(q, p).setY(0).normalize();
       // Horizontal normal: rotate the ground track a quarter turn.
       const nx = -tangent.z, nz = tangent.x;
-      pos.push(p.x + nx * HALF_W, p.y, p.z + nz * HALF_W);
-      pos.push(p.x - nx * HALF_W, p.y, p.z - nz * HALF_W);
+      pos.push(p.x + nx * HALF_W, p.y + ROAD_Y, p.z + nz * HALF_W);
+      pos.push(p.x - nx * HALF_W, p.y + ROAD_Y, p.z - nz * HALF_W);
       if (i > 0) {
         const a = (i - 1) * 2;
         idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
@@ -1801,10 +1807,6 @@ addNode("junction-01", "Развязка", buildJunctionMesh(), 10);
 // lane divider. Trucks drive on the right (see LANE_OFFSET / updateTrucks).
 // ---------------------------------------------------------------------------
 
-const ROAD_Y = 0.3, ROAD_W = 8.5, LANE_OFFSET = 2.3;
-// On the shared haul ramp there is no carriageway box -- the ramp ribbon is
-// the running surface -- so a truck there rides at the ribbon itself.
-const RAMP_RIDE_Y = 0.05;
 const _yAxis = new THREE.Vector3(0, 1, 0), _zAxis = new THREE.Vector3(0, 0, 1);
 const _qPitch = new THREE.Quaternion();
 // Where roads actually stop: in front of the crusher's tipping pad and at the
@@ -2034,20 +2036,11 @@ function buildRoads() {
 function roadPose(roadId, fracAlongFromTo) {
   const wp = roadWaypoints(roadId);
   if (!wp) return { pos: NODE_POSITIONS["junction-01"], heading: 0, pitch: 0 };
-  const [paveFrom, paveTo] = wp.pave ?? [0, wp.length - 1];
-  const segPose = (p0, p1, local, i) => {
-    const run = Math.hypot(p1[0] - p0[0], p1[2] - p0[2]) || 1e-6;
-    const lift = i >= paveFrom && i < paveTo ? ROAD_Y : RAMP_RIDE_Y;
-    return {
-      pos: [
-        p0[0] + (p1[0] - p0[0]) * local,
-        p0[1] + (p1[1] - p0[1]) * local + lift,
-        p0[2] + (p1[2] - p0[2]) * local,
-      ],
-      heading: Math.atan2(p1[0] - p0[0], p1[2] - p0[2]),
-      pitch: Math.atan2(p1[1] - p0[1], run),
-    };
-  };
+  const segPose = (p0, p1, local) => [
+    p0[0] + (p1[0] - p0[0]) * local,
+    p0[1] + (p1[1] - p0[1]) * local + ROAD_Y,
+    p0[2] + (p1[2] - p0[2]) * local,
+  ];
   // Walk the polyline by arc length, so a ramp of many short segments is
   // traversed at an even speed instead of racing through the tight turns.
   const seg = [];
@@ -2057,12 +2050,28 @@ function roadPose(roadId, fracAlongFromTo) {
     seg.push(len);
     total += len;
   }
-  let d = THREE.MathUtils.clamp(fracAlongFromTo, 0, 1) * total;
-  for (let i = 0; i < seg.length; i++) {
-    if (d <= seg[i] || i === seg.length - 1) return segPose(wp[i], wp[i + 1], Math.min(1, d / seg[i]), i);
-    d -= seg[i];
-  }
-  return segPose(wp[0], wp[1], 0, 0);
+  const at = (frac) => {
+    let d = THREE.MathUtils.clamp(frac, 0, 1) * total;
+    for (let i = 0; i < seg.length; i++) {
+      if (d <= seg[i] || i === seg.length - 1) return segPose(wp[i], wp[i + 1], Math.min(1, d / seg[i]));
+      d -= seg[i];
+    }
+    return segPose(wp[0], wp[1], 0);
+  };
+  // Heading and pitch come from a finite difference along the polyline, not
+  // from the segment the truck happens to be on. Per-segment values are
+  // constant inside a segment and jump at every vertex, and a bench arc is
+  // 14 vertices of a curve -- which is what made the trucks snap their way
+  // round instead of driving round.
+  const f = THREE.MathUtils.clamp(fracAlongFromTo, 0, 1);
+  const eps = Math.min(0.03, 6 / total);
+  const back = at(Math.max(0, f - eps)), fwd = at(Math.min(1, f + eps));
+  const run = Math.hypot(fwd[0] - back[0], fwd[2] - back[2]) || 1e-6;
+  return {
+    pos: at(f),
+    heading: Math.atan2(fwd[0] - back[0], fwd[2] - back[2]),
+    pitch: Math.atan2(fwd[1] - back[1], run),
+  };
 }
 
 // ---------------------------------------------------------------------------
