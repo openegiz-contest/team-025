@@ -168,6 +168,7 @@ class Crusher:
     # tipping yet. Tipping takes DUMP_SECONDS, and without this two trucks
     # both measure the same free space during that gap and both tip into it.
     hopper_pending_t: float = 0.0
+    tonnes_total: float = 0.0   # lifetime, survives shift rollover
 
     def hopper_room(self):
         """Tonnes the dump pocket can still take, net of loads already on
@@ -194,6 +195,12 @@ class Crusher:
     def add(self, now, tonnes, grade):
         self.window_log.append((now, tonnes, grade))
         self.tonnes_shift += tonnes
+        # Never reset, unlike tonnes_shift: the conveyor is loaded from the
+        # growth of this counter, so it must not jump backwards at a shift
+        # boundary and must not be the windowed average, which keeps decaying
+        # after the crusher stops and would put rock on the belt that the
+        # crusher never produced.
+        self.tonnes_total += tonnes
 
     def windowed(self, now, window_s=3600.0):
         self.window_log = [e for e in self.window_log if now - e[0] <= window_s]
@@ -276,6 +283,12 @@ class Section:
         # (arrival_time, tonnes): what is riding the belt right now. A bucket
         # leaves the crusher at `now` and reaches the plant one transit later.
         self.conveyor_belt = deque()
+        self.conveyor_fed_total = 0.0  # watermark into crusher.tonnes_total
+        # Short surge pocket at the belt tail: what the crusher has discharged
+        # but the belt has not picked up yet, because the belt only takes
+        # CONVEYOR_RATED_TPH. Dropping this instead of holding it is how the
+        # belt silently lost 1 516 t of the 31 112 t the crusher put out.
+        self.conveyor_queue_t = 0.0
         self.conveyor_tonnes_shift = 0.0
         self.shift_tonnes_grade_sum = 0.0  # cumulative, whole shift (unlike crusher.window_log)
         self.shift_number = 1
@@ -317,26 +330,30 @@ class Section:
         self.face_reserves[face_id] = max(0.0, self.face_reserves[face_id] - tonnes)
         self.face_mined_shift[face_id] += tonnes
 
-    def conveyor_step(self, now, dt_s, crusher_tph):
+    def conveyor_step(self, now, dt_s, produced_t):
         """Carry the crusher's discharge to the plant, one transit time later.
 
-        Returns (tonnes delivered this step, tonnes currently on the belt).
+        `produced_t` is what the crusher actually put out since the last step,
+        not its reported rate. Returns (t/h delivered, tonnes on the belt).
         The belt is a travelling queue, not a pipe: what the crusher loads now
         arrives CONVEYOR_TRANSIT_S from now, so the belt goes on running --
         and the plant goes on being fed -- for a full transit after the
         crusher stops, and stays empty for a transit after it restarts.
         Loading is clipped at the belt's rating, which is what makes the belt
         its own limit rather than a mirror of the crusher."""
+        on_belt = lambda: sum(t for _, t in self.conveyor_belt) + self.conveyor_queue_t
         if dt_s <= 0:
-            return 0.0, sum(t for _, t in self.conveyor_belt)
-        loaded_t = min(crusher_tph, c.CONVEYOR_RATED_TPH) * dt_s / 3600.0
+            return 0.0, on_belt()
+        self.conveyor_queue_t += produced_t
+        loaded_t = min(self.conveyor_queue_t, c.CONVEYOR_RATED_TPH * dt_s / 3600.0)
+        self.conveyor_queue_t -= loaded_t
         if loaded_t > 0:
             self.conveyor_belt.append((now + c.CONVEYOR_TRANSIT_S, loaded_t))
         delivered = 0.0
         while self.conveyor_belt and self.conveyor_belt[0][0] <= now:
             delivered += self.conveyor_belt.popleft()[1]
         self.conveyor_tonnes_shift += delivered
-        return delivered / (dt_s / 3600.0), sum(t for _, t in self.conveyor_belt)
+        return delivered / (dt_s / 3600.0), on_belt()
 
     def crusher_add(self, now, tonnes, grade):
         self.crusher.add(now, tonnes, grade)
@@ -752,8 +769,9 @@ def build_snapshot(section, now, speedup):
 
     crusher_feats, crusher_state = section.crusher.features(now)
     things["crusher-01"] = crusher_feats
-    belt_tph, on_belt_t = section.conveyor_step(
-        now, now - section.last_snapshot_t, crusher_feats["throughput_tph"]["value"])
+    produced_t = section.crusher.tonnes_total - section.conveyor_fed_total
+    section.conveyor_fed_total = section.crusher.tonnes_total
+    belt_tph, on_belt_t = section.conveyor_step(now, now - section.last_snapshot_t, produced_t)
     section.last_snapshot_t = now
     things["conveyor-01"] = {
         "state": {"value": "running" if on_belt_t > 0 else "stopped"},
